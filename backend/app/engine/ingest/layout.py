@@ -79,6 +79,20 @@ _ROLE_KEYWORDS: dict[str, list[str]] = {
 }
 
 
+# Negative keywords: if a header contains any of these words after
+# matching a role, the match is rejected. This prevents "local currency
+# rate" from claiming the "currency" role, or "accounting release start
+# date" from claiming "date". Only needed for roles whose keywords are
+# short and generic enough to appear as substrings in unrelated headers.
+_ROLE_REJECT_WORDS: dict[str, set[str]] = {
+    "currency": {"rate", "local", "group"},
+    "date": {"release", "template", "start", "end", "accounting"},
+    "gl_account": {"release", "template", "accounting"},
+    "debit": {"note"},
+    "credit": {"note"},
+}
+
+
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
 
@@ -88,21 +102,61 @@ def _normalise_header(text) -> str:
     return _NON_ALNUM.sub(" ", str(text).strip().lower()).strip()
 
 
-def _match_role(header_text: str) -> str | None:
-    """Match a normalised header to a canonical role, or return None."""
+def _is_rejected(role: str, header_text: str) -> bool:
+    """Check if a role match should be rejected based on negative keywords."""
+    reject_words = _ROLE_REJECT_WORDS.get(role)
+    if not reject_words:
+        return False
+    header_words = set(header_text.split())
+    return bool(header_words & reject_words)
+
+
+def _word_boundary_match(keyword: str, text: str) -> bool:
+    """Check if keyword appears as a contiguous word sequence in text.
+
+    Both keyword and text should be pre-normalised (lowercase, non-alnum
+    replaced with spaces). This prevents "cr" matching "des-cr-iption"
+    while still allowing "cr" to match "cr amount" or just "cr".
+    """
+    kw_words = keyword.split()
+    text_words = text.split()
+    kw_len = len(kw_words)
+    for i in range(len(text_words) - kw_len + 1):
+        if text_words[i : i + kw_len] == kw_words:
+            return True
+    return False
+
+
+def _match_role(header_text: str, *, exclude_roles: set[str] | None = None) -> str | None:
+    """Match a normalised header to a canonical role, or return None.
+
+    exclude_roles: roles already claimed by another column. A role can
+    only be assigned to one source column per layout — if "credit" is
+    already taken, a column called "local credit note" won't steal it.
+    """
     if not header_text:
         return None
-    # Exact normalised match first, then substring match.
-    # We search the most specific keyword lists first so, e.g., "document
-    # currency" wins over a plain "currency" when both are plausible.
+    exclude = exclude_roles or set()
+
+    # Pass 1: exact match (strongest signal).
     for role, keywords in _ROLE_KEYWORDS.items():
+        if role in exclude:
+            continue
         for kw in keywords:
-            if header_text == kw:
+            if header_text == kw and not _is_rejected(role, header_text):
                 return role
+
+    # Pass 2: word-boundary match. "cr" matches "cr amount" but NOT
+    # "description". Keywords are tried longest-first within each role
+    # so more specific phrases win ties. Reject-words prevent false
+    # positives like "local currency rate" claiming "currency".
     for role, keywords in _ROLE_KEYWORDS.items():
+        if role in exclude:
+            continue
         for kw in keywords:
-            if kw in header_text:
+            if _word_boundary_match(kw, header_text) and not _is_rejected(role, header_text):
                 return role
+
     return None
 
 
@@ -141,18 +195,22 @@ def _score_header_row(df: pd.DataFrame, row_idx: int) -> tuple[float, list[str],
     label_ratio = 1.0 - (numeric_count / len(non_empty))
 
     # Role match ratio: how many headers resolve to a canonical role?
+    # Each canonical role can only be claimed by ONE source column. Once
+    # "credit" is assigned, no other column gets it — this prevents
+    # "entry description" from also being labelled "credit".
     roles: dict[str, str] = {}
+    claimed_roles: set[str] = set()
     raw_headers: list[str] = []
     for c in row:
         header_text = _normalise_header(c)
         raw_headers.append(str(c) if c is not None and not (isinstance(c, float) and pd.isna(c)) else "")
         if not header_text:
             continue
-        role = _match_role(header_text)
+        role = _match_role(header_text, exclude_roles=claimed_roles)
         if role and str(c) not in roles:
-            # Preserve first occurrence of each source column
             roles[str(c)] = role
-    distinct_roles = set(roles.values())
+            claimed_roles.add(role)
+    distinct_roles = claimed_roles
     role_match_ratio = len(distinct_roles) / max(len(JOURNAL_ENTRY_CONTRACT["required_columns"]), 1)
     role_match_ratio = min(role_match_ratio, 1.0)
 

@@ -23,6 +23,17 @@ JE_INTENTS: dict[str, dict] = {
         "action": "convert",
         "output_schema": "light_journal_entry",
         "requires_post_validation": True,
+        # Conservation: properties the transform must preserve from source
+        # to output. The engine snapshots these at ingest, re-checks after
+        # the transform, and blocks export on any violation.
+        # These are NOT JE-specific concepts — the conservation engine is
+        # generic. Other file types declare their own conserved properties.
+        "conserve": [
+            {"type": "sum",   "field": "debit",    "tolerance": 0.01},
+            {"type": "sum",   "field": "credit",   "tolerance": 0.01},
+            {"type": "count", "field": "rows"},
+            {"type": "set",   "field": "entry_id"},
+        ],
     },
     "validate_je": {
         "label": "Validate a journal entry file",
@@ -34,6 +45,8 @@ JE_INTENTS: dict[str, dict] = {
         "action": "validate",
         "output_schema": None,
         "requires_post_validation": False,
+        # Validation-only: no transform, so nothing to conserve.
+        "conserve": [],
     },
     "reconcile_je_to_gl": {
         "label": "Reconcile journal entries against a GL extract",
@@ -46,5 +59,8 @@ JE_INTENTS: dict[str, dict] = {
         "action": "reconcile",
         "output_schema": "reconciliation_report",
         "requires_post_validation": False,
+        "conserve": [
+            {"type": "count", "field": "rows"},
+        ],
     },
 }
