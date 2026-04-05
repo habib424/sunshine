@@ -156,9 +156,26 @@ def execute_script(session_id: str, output_path: Path) -> dict:
     if not isinstance(df, pd.DataFrame):
         return {"success": False, "error": f"Script returned {type(df).__name__}, expected DataFrame"}
 
-    # Save output
+    # Save output — preserve the original workbook in full and append the
+    # transformed result as a new sheet so the user can audit the migration.
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_excel(output_path, index=False, engine="openpyxl")
+    from app.engine.pipeline import run_export
+
+    source_path = Path(file_path)
+    # Derive topic from the output filename, stripping the source filename prefix.
+    topic = output_path.stem
+    src_stem = source_path.stem
+    if topic.startswith(src_stem):
+        topic = topic[len(src_stem):].lstrip("_- ") or src_stem
+    if not topic or topic == src_stem:
+        topic = session.get("goal") or "migrated"
+
+    run_export(
+        df,
+        output_path,
+        source_file_path=source_path,
+        working_sheet_topic=topic,
+    )
 
     return {
         "success": True,

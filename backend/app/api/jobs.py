@@ -160,7 +160,13 @@ async def run_job(job_id: str, db: AsyncSession = Depends(get_db)):
             template_name = ft_config.get("target_template")
             template_path = settings.playbooks_path / "_templates" / template_name if template_name else None
 
-            run_export(transformed, output_file, template_path)
+            run_export(
+                transformed,
+                output_file,
+                template_path=template_path,
+                source_file_path=file_path,
+                working_sheet_topic=upload.file_type or "migrated",
+            )
             upload.status = "completed"
 
         job.status = "completed"
@@ -212,7 +218,21 @@ async def run_direct(body: dict, db: AsyncSession = Depends(get_db)):
         output_dir = settings.outputs_path / job_id
         output_dir.mkdir(parents=True, exist_ok=True)
         output_file = output_dir / output_filename
-        run_export(transformed, output_file)
+
+        # Derive a topic for the working sheet from the output filename stem,
+        # stripping the source filename prefix when possible so the topic reads
+        # as the migration target (e.g. "Light_Upload") rather than the source.
+        topic = Path(output_filename).stem
+        if upload.original_name:
+            src_stem = Path(upload.original_name).stem
+            if topic.startswith(src_stem):
+                topic = topic[len(src_stem):].lstrip("_- ") or src_stem
+        run_export(
+            transformed,
+            output_file,
+            source_file_path=file_path,
+            working_sheet_topic=topic or "migrated",
+        )
 
         job.status = "completed"
         job.output_path = str(output_dir)

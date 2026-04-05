@@ -135,25 +135,70 @@ def run_validate(df: pd.DataFrame, file_type_config: dict) -> list[dict]:
     return all_issues
 
 
-def run_export(df: pd.DataFrame, output_path: Path, template_path: Path | None = None) -> Path:
+_INVALID_SHEET_CHARS = set(r':\/?*[]')
+
+
+def _sanitize_sheet_name(name: str) -> str:
+    """Make a sheet name Excel-safe: strip forbidden chars and cap at 31 chars."""
+    cleaned = ''.join('-' if c in _INVALID_SHEET_CHARS else c for c in name).strip()
+    if not cleaned:
+        cleaned = 'working file - output'
+    return cleaned[:31]
+
+
+def _unique_sheet_name(wb, desired: str) -> str:
+    """Return a sheet name not already in the workbook, respecting the 31-char limit."""
+    if desired not in wb.sheetnames:
+        return desired
+    base = desired[:28]  # leave room for suffix
+    i = 2
+    while f"{base}({i})" in wb.sheetnames:
+        i += 1
+    return f"{base}({i})"
+
+
+def _write_df_to_sheet(ws, df: pd.DataFrame) -> None:
+    for col_idx, col_name in enumerate(df.columns, start=1):
+        ws.cell(row=1, column=col_idx, value=col_name)
+    for row_idx, row in enumerate(df.itertuples(index=False), start=2):
+        for col_idx, value in enumerate(row, start=1):
+            ws.cell(row=row_idx, column=col_idx, value=value)
+
+
+def run_export(
+    df: pd.DataFrame,
+    output_path: Path,
+    template_path: Path | None = None,
+    source_file_path: Path | None = None,
+    working_sheet_topic: str | None = None,
+) -> Path:
+    """Write the transformed dataframe to output_path.
+
+    When source_file_path is provided, the original workbook is preserved in full
+    (all sheets untouched) and the transformed result is appended as a new sheet
+    named "working file - <topic>". This gives the user an audit trail: the
+    original source and the migration result in a single file.
+    """
     import openpyxl
 
-    if template_path and template_path.exists():
+    working_sheet_name = _sanitize_sheet_name(
+        f"working file - {working_sheet_topic}" if working_sheet_topic else "working file - output"
+    )
+
+    if source_file_path and Path(source_file_path).exists():
+        # Preserve original workbook; append transformed result as a new sheet.
+        wb = openpyxl.load_workbook(source_file_path)
+        sheet_name = _unique_sheet_name(wb, working_sheet_name)
+        ws = wb.create_sheet(title=sheet_name)
+        _write_df_to_sheet(ws, df)
+        wb.save(output_path)
+    elif template_path and template_path.exists():
         wb = openpyxl.load_workbook(template_path)
         ws = wb.active
-
-        # Write headers in row 1
-        for col_idx, col_name in enumerate(df.columns, start=1):
-            ws.cell(row=1, column=col_idx, value=col_name)
-
-        # Write data starting from row 2
-        for row_idx, row in enumerate(df.itertuples(index=False), start=2):
-            for col_idx, value in enumerate(row, start=1):
-                ws.cell(row=row_idx, column=col_idx, value=value)
-
+        _write_df_to_sheet(ws, df)
         wb.save(output_path)
     else:
-        # No template - create fresh workbook
+        # No source and no template - create fresh workbook
         df.to_excel(output_path, index=False, engine="openpyxl")
 
     return output_path
