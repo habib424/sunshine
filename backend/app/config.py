@@ -1,8 +1,23 @@
+import os
 from pathlib import Path
 from pydantic_settings import BaseSettings
 
 # Project root is one level up from backend/
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+# Pydantic-settings resolves values in this order:
+#     init args > environment variables > .env file > field defaults
+# An environment variable that is *set but empty* therefore silently
+# shadows whatever is in .env, which almost never matches the user's
+# intent and produces confusing failures — e.g. the Anthropic SDK
+# rejecting an empty api_key even though .env contains a valid one.
+# Wipe empty values for known config keys so .env takes effect. Only
+# empty strings are touched; real values are left alone.
+_EMPTY_SHADOWING_KEYS = ("ANTHROPIC_API_KEY",)
+for _key in _EMPTY_SHADOWING_KEYS:
+    if os.environ.get(_key, None) == "":
+        del os.environ[_key]
 
 
 class Settings(BaseSettings):
