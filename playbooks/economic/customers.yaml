@@ -1,0 +1,30 @@
+file_type: customers
+source_erp: economic
+target_template: customers.xlsx
+
+source_sheet: 0
+header_row: 0
+
+mappings:
+  - source: "Customer number"
+    target: "customer_number"
+    transform: strip_whitespace
+
+  - source: "Customer name"
+    target: "customer_name"
+    transform: strip_whitespace
+
+  - source: "Address"
+    target: "address"
+    transform: strip_whitespace
+
+validations:
+  - validator: required_fields
+    severity: error
+    params:
+      fields: ["customer_number", "customer_name"]
+
+  - validator: no_duplicates
+    severity: error
+    params:
+      columns: ["customer_number"]

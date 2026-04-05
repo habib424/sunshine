@@ -1,0 +1,30 @@
+file_type: vendors
+source_erp: economic
+target_template: vendors.xlsx
+
+source_sheet: 0
+header_row: 0
+
+mappings:
+  - source: "Supplier number"
+    target: "vendor_number"
+    transform: strip_whitespace
+
+  - source: "Supplier name"
+    target: "vendor_name"
+    transform: strip_whitespace
+
+  - source: "Address"
+    target: "address"
+    transform: strip_whitespace
+
+validations:
+  - validator: required_fields
+    severity: error
+    params:
+      fields: ["vendor_number", "vendor_name"]
+
+  - validator: no_duplicates
+    severity: error
+    params:
+      columns: ["vendor_number"]

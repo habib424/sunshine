@@ -1,0 +1,35 @@
+file_type: gl_history
+source_erp: economic
+target_template: gl_history.xlsx
+
+source_sheet: 0
+header_row: 0
+
+mappings:
+  - source: "Date"
+    target: "posting_date"
+    transform: normalize_date
+    params:
+      output_format: "%Y-%m-%d"
+
+  - source: "Account number"
+    target: "account_number"
+    transform: strip_whitespace
+
+  - source: "Account name"
+    target: "account_name"
+    transform: strip_whitespace
+
+  - source: "Text"
+    target: "description"
+    transform: strip_whitespace
+
+  - source: "Amount"
+    target: "amount"
+    transform: parse_currency
+
+validations:
+  - validator: required_fields
+    severity: error
+    params:
+      fields: ["posting_date", "account_number", "amount"]

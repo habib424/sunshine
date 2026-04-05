@@ -1,0 +1,30 @@
+file_type: chart_of_accounts
+source_erp: economic
+target_template: chart_of_accounts.xlsx
+
+source_sheet: 0
+header_row: 0
+
+mappings:
+  - source: "Account number"
+    target: "account_number"
+    transform: strip_whitespace
+
+  - source: "Account name"
+    target: "account_name"
+    transform: strip_whitespace
+
+  - source: "Account type"
+    target: "account_type"
+    transform: strip_whitespace
+
+validations:
+  - validator: required_fields
+    severity: error
+    params:
+      fields: ["account_number", "account_name"]
+
+  - validator: no_duplicates
+    severity: error
+    params:
+      columns: ["account_number"]

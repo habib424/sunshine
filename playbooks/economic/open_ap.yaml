@@ -1,0 +1,35 @@
+file_type: open_ap
+source_erp: economic
+target_template: open_ap.xlsx
+
+source_sheet: 0
+header_row: 0
+
+mappings:
+  - source: "Supplier"
+    target: "vendor_number"
+    transform: strip_whitespace
+
+  - source: "Invoice number"
+    target: "invoice_number"
+    transform: strip_whitespace
+
+  - source: "Due date"
+    target: "due_date"
+    transform: normalize_date
+    params:
+      output_format: "%Y-%m-%d"
+
+  - source: "Amount"
+    target: "amount"
+    transform: parse_currency
+
+  - source: "Currency"
+    target: "currency"
+    transform: uppercase
+
+validations:
+  - validator: required_fields
+    severity: error
+    params:
+      fields: ["vendor_number", "invoice_number", "amount"]

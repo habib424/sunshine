@@ -1,0 +1,21 @@
+display_name: Light — Opening TB Upload
+description: >
+  Transforms a multi-entity Trial Balance workbook into the Light journal
+  entry upload format. Reads entity currencies from the Entities tab, unpivots
+  all entity columns from the TB tab, and splits balances into debit/credit.
+version: "1.0"
+source_erp: any
+target_erp: light
+
+file_types:
+  - trial_balance
+
+detection_rules:
+  - file_type: trial_balance
+    indicators:
+      filename_patterns:
+        - "*tb*"
+        - "*trial*balance*"
+        - "*opening*"
+      column_signatures:
+        - ["Light account number", "NEW Account Name", "OLD Account Name"]

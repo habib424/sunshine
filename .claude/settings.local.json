@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm --version)",
+      "Bash(where python:*)",
+      "Bash(py --version)",
+      "Bash(py -3 --version)",
+      "Bash(/c/Users/Habib/AppData/Local/Microsoft/WindowsApps/python3 --version)",
+      "Bash(pip --version)",
+      "Bash(pip3 --version)",
+      "Bash(uv --version)",
+      "Bash(npm install:*)",
+      "Bash(npx tsc:*)",
+      "Bash(ls /c/Python*/python.exe)",
+      "Read(//c/Users/Habib/AppData/Local/Programs/**)",
+      "Read(//c/Program Files/**)",
+      "Read(//d/Sunshine/frontend/$LOCALAPPDATA/Programs/Python/*/**)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(python -m pip --version)",
+      "Bash(python -m pip install -e .)",
+      "Bash(python -m pip install fastapi \"uvicorn[standard]\" \"sqlalchemy[asyncio]\" aiosqlite alembic pydantic-settings python-multipart openpyxl pandas pyyaml anthropic jinja2)",
+      "Bash(python -c \"from app.main import app; print\\(''Backend imports OK''\\)\")",
+      "Read(//c/Users/Habib/AppData/Roaming/Claude/local-agent-mode-sessions/skills-plugin/54f20edf-c9e4-48c5-9026-739965f80a90/40f07c7a-75b4-4c97-9b0b-d91459b20a76/skills/xlsx/**)",
+      "Bash(python -c \":*)"
+    ]
+  }
+}

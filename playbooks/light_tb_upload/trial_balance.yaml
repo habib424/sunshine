@@ -1,0 +1,35 @@
+# File-level transform — reads all sheets, no column-by-column mapping needed
+transform_type: file
+handler: tb_opening_balance
+
+params:
+  # Sheet names in the source workbook
+  entities_sheet: Entities
+  tb_sheet: TB
+
+  # Entities tab layout (0-indexed columns)
+  entities_header_row: 1        # Row index of the header row (row 0 is blank)
+  entities_name_col: 2          # Column C — Display name
+  entities_currency_col: 4      # Column E — Local Currency
+
+  # TB tab layout (0-indexed)
+  tb_header_row: 1              # Row index of the column header row
+  tb_account_col: 0             # Column A — Light account number
+  tb_first_entity_col: 3        # Column D — first entity balance column
+
+  # Output settings
+  date: "2025-12-31"
+  entry_description: "Data migration : Opening TB"
+  entry_id_prefix: "Opening-TB-2025-"
+
+validations:
+  - validator: no_nulls
+    severity: error
+    params:
+      columns:
+        - "Company"
+        - "entry id (required)"
+        - "date (required)"
+        - "currency (required)"
+        - "account code (required)"
+        - "entry description (required)"

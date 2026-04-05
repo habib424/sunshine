@@ -1,0 +1,84 @@
+name: economic
+display_name: "e-conomic (Visma)"
+version: "1.0"
+description: "Transforms e-conomic / Visma exports to Light.inc format"
+
+detection_rules:
+  - file_type: trial_balance
+    indicators:
+      column_signatures:
+        - ["Account number", "Account name", "Debit", "Credit"]
+        - ["Kontonummer", "Kontonavn", "Debet", "Kredit"]
+        - ["Account", "Name", "Debit", "Credit", "Balance"]
+      filename_patterns:
+        - "trial*balance*"
+        - "TB_*"
+        - "kontoplan*"
+
+  - file_type: gl_history
+    indicators:
+      column_signatures:
+        - ["Date", "Account number", "Account name", "Text", "Amount"]
+        - ["Dato", "Kontonummer", "Kontonavn", "Tekst", "Beløb"]
+      filename_patterns:
+        - "gl_*"
+        - "general_ledger*"
+        - "kontoudtog*"
+
+  - file_type: open_ap
+    indicators:
+      column_signatures:
+        - ["Supplier", "Invoice number", "Due date", "Amount", "Currency"]
+        - ["Leverandør", "Fakturanummer", "Forfaldsdato", "Beløb"]
+      filename_patterns:
+        - "open_ap*"
+        - "ap_*"
+        - "leverandør*"
+
+  - file_type: open_ar
+    indicators:
+      column_signatures:
+        - ["Customer", "Invoice number", "Due date", "Amount", "Currency"]
+        - ["Kunde", "Fakturanummer", "Forfaldsdato", "Beløb"]
+      filename_patterns:
+        - "open_ar*"
+        - "ar_*"
+        - "debitor*"
+
+  - file_type: chart_of_accounts
+    indicators:
+      column_signatures:
+        - ["Account number", "Account name", "Account type"]
+        - ["Kontonummer", "Kontonavn", "Kontotype"]
+      filename_patterns:
+        - "coa*"
+        - "chart*"
+        - "kontoplan*"
+
+  - file_type: vendors
+    indicators:
+      column_signatures:
+        - ["Supplier number", "Supplier name", "Address"]
+        - ["Leverandørnummer", "Leverandørnavn", "Adresse"]
+      filename_patterns:
+        - "vendor*"
+        - "supplier*"
+        - "leverandør*"
+
+  - file_type: customers
+    indicators:
+      column_signatures:
+        - ["Customer number", "Customer name", "Address"]
+        - ["Kundenummer", "Kundenavn", "Adresse"]
+      filename_patterns:
+        - "customer*"
+        - "kunde*"
+
+file_types:
+  - trial_balance
+  - gl_history
+  - open_ap
+  - open_ar
+  - chart_of_accounts
+  - vendors
+  - customers

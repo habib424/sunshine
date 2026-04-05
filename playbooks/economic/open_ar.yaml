@@ -1,0 +1,35 @@
+file_type: open_ar
+source_erp: economic
+target_template: open_ar.xlsx
+
+source_sheet: 0
+header_row: 0
+
+mappings:
+  - source: "Customer"
+    target: "customer_number"
+    transform: strip_whitespace
+
+  - source: "Invoice number"
+    target: "invoice_number"
+    transform: strip_whitespace
+
+  - source: "Due date"
+    target: "due_date"
+    transform: normalize_date
+    params:
+      output_format: "%Y-%m-%d"
+
+  - source: "Amount"
+    target: "amount"
+    transform: parse_currency
+
+  - source: "Currency"
+    target: "currency"
+    transform: uppercase
+
+validations:
+  - validator: required_fields
+    severity: error
+    params:
+      fields: ["customer_number", "invoice_number", "amount"]
