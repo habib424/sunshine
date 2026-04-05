@@ -31,6 +31,13 @@ export default function IntentAnalysis({ uploadId, filename, onProceed }: Props)
     getIntents().then(setIntents).catch(() => {});
   }, []);
 
+  const handleReset = () => {
+    setSelectedIntent(null);
+    setResult(null);
+    setError(null);
+    setExpandedCode(null);
+  };
+
   const handleAnalyze = async (intent: string) => {
     setSelectedIntent(intent);
     setAnalyzing(true);
@@ -129,16 +136,18 @@ export default function IntentAnalysis({ uploadId, filename, onProceed }: Props)
                   ))}
                 </div>
               )}
-              <p className="text-xs text-gray-400">
-                The system needs more column mappings to proceed. This will be addressed in the transformation step.
-              </p>
+              {result.layout?.missing_required?.length > 0 && (
+                <p className="text-xs text-amber-600 mt-2">
+                  Missing columns are reported as validation findings below.
+                </p>
+              )}
             </div>
           </div>
         </div>
       )}
 
-      {/* Analysis Results — only when we have data (applied_detected or applied_cached) */}
-      {result && !analyzing && (result.status === "applied_detected" || result.status === "applied_cached") && (
+      {/* Analysis Results — show whenever we have rows (any status with data) */}
+      {result && !analyzing && result.rows > 0 && (
         <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
           {/* Header with summary */}
           <div className="p-6 border-b border-gray-100">
@@ -242,32 +251,36 @@ export default function IntentAnalysis({ uploadId, filename, onProceed }: Props)
           )}
 
           {/* Action buttons */}
-          <div className="px-6 py-4 bg-white border-t border-gray-100 flex gap-3 justify-end">
-            {selectedIntent === "validate_je" ? (
-              <button
-                onClick={() => setResult(null)}
-                className="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50"
-              >
-                Validate another
-              </button>
-            ) : (
-              <>
-                {errorCount === 0 && (
-                  <button
-                    onClick={onProceed}
-                    className="px-5 py-2 text-sm font-medium bg-sunshine-500 text-white rounded-lg hover:bg-sunshine-600 transition-colors"
-                  >
-                    Proceed to transformation
-                  </button>
-                )}
-                {errorCount > 0 && (
-                  <div className="flex items-center gap-2 text-xs text-red-500">
-                    <XCircle className="w-4 h-4" />
-                    <span>{errorCount} error{errorCount > 1 ? "s" : ""} must be resolved before transformation</span>
-                  </div>
-                )}
-              </>
-            )}
+          <div className="px-6 py-4 bg-white border-t border-gray-100 flex items-center gap-3 justify-between">
+            <div className="text-xs text-gray-400">
+              {errorCount > 0 && (
+                <span className="text-red-500">{errorCount} error{errorCount > 1 ? "s" : ""} found</span>
+              )}
+              {errorCount > 0 && warningCount > 0 && <span className="mx-1">|</span>}
+              {warningCount > 0 && (
+                <span className="text-amber-500">{warningCount} warning{warningCount > 1 ? "s" : ""}</span>
+              )}
+              {errorCount === 0 && warningCount === 0 && (
+                <span className="text-green-500">No issues found</span>
+              )}
+            </div>
+            <div className="flex gap-3">
+              {selectedIntent === "validate_je" ? (
+                <button
+                  onClick={handleReset}
+                  className="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50"
+                >
+                  Validate another file
+                </button>
+              ) : (
+                <button
+                  onClick={onProceed}
+                  className="px-5 py-2 text-sm font-medium bg-sunshine-500 text-white rounded-lg hover:bg-sunshine-600 transition-colors"
+                >
+                  Proceed to transformation
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}

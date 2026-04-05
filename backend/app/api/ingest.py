@@ -87,6 +87,17 @@ async def analyze_upload(
     except KeyError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    # When the user explicitly asks to analyze, always try to apply the
+    # layout — even at low confidence — and show what we find. The
+    # confidence threshold exists for unattended pipeline runs; when a
+    # human clicks "analyze", they want results, not to be blocked.
+    if result.dataframe is None and result.layout.get("sheet") is not None:
+        from app.engine.ingest.layout import apply_layout
+        try:
+            result.dataframe = apply_layout(file_path, result.layout)
+        except Exception:
+            pass  # If apply fails, we proceed with no DataFrame
+
     response = {
         "upload_id": upload_id,
         "filename": upload.original_name,
