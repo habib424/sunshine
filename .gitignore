@@ -25,6 +25,10 @@ backend/storage/outputs/
 backend/storage/temp/
 backend/storage/sunshine.db
 
+# Learned runtime state (layouts, resolutions). Source of truth is
+# per-installation; not committed to the repo.
+backend/data/
+
 # Node.js
 frontend/node_modules/
 frontend/dist/
