@@ -1,15 +1,17 @@
 import { useState, useEffect } from "react";
 import DropZone from "../components/upload/DropZone";
+import IntentAnalysis from "../components/upload/IntentAnalysis";
 import TransformChat from "../components/chat/TransformChat";
 import { uploadFiles, startChat, getExportUrl } from "../api/client";
 import { useAppStore } from "../stores/appStore";
 
-type Step = "upload" | "starting" | "chat" | "done";
+type Step = "upload" | "intent" | "starting" | "chat" | "done";
 
 export default function UploadPage() {
   const { addUploads, setUploads } = useAppStore();
   const [step, setStep] = useState<Step>("upload");
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadId, setUploadId] = useState<string | null>(null);
   const [uploadedName, setUploadedName] = useState("");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [initialMessage, setInitialMessage] = useState("");
@@ -31,20 +33,31 @@ export default function UploadPage() {
       const uploaded = await uploadFiles([files[0]]);
       const u = uploaded[0];
       addUploads(uploaded);
+      setUploadId(u.id);
       setUploadedName(u.original_name);
-      setStep("starting");
-
-      // Start chat session — AI analyzes and proposes plan
-      const chat = await startChat(u.id);
-      setSessionId(chat.session_id);
-      setInitialMessage(chat.message);
-      setInitialHasScript(chat.has_script || false);
-      setStep("chat");
+      // Go to intent selection instead of jumping straight to chat
+      setStep("intent");
     } catch (e: any) {
       setError(e.message || "Unknown error");
       setStep("upload");
     } finally {
       setIsUploading(false);
+    }
+  };
+
+  const handleProceedToChat = async () => {
+    if (!uploadId) return;
+    setStep("starting");
+    setError(null);
+    try {
+      const chat = await startChat(uploadId);
+      setSessionId(chat.session_id);
+      setInitialMessage(chat.message);
+      setInitialHasScript(chat.has_script || false);
+      setStep("chat");
+    } catch (e: any) {
+      setError(e.message || "Failed to start chat session");
+      setStep("intent");
     }
   };
 
@@ -58,38 +71,54 @@ export default function UploadPage() {
     setSessionId(null);
     setInitialMessage("");
     setUploadedName("");
+    setUploadId(null);
     setJobId(null);
     setError(null);
   };
 
-  const STEPS: Step[] = ["upload", "starting", "chat", "done"];
+  const STEPS: Step[] = ["upload", "intent", "starting", "chat", "done"];
   const STEP_LABELS: Record<Step, string> = {
-    upload: "Upload", starting: "Analyze", chat: "Configure", done: "Download",
+    upload: "Upload",
+    intent: "Analyze",
+    starting: "Preparing",
+    chat: "Configure",
+    done: "Download",
   };
+
+  // Steps to show in the indicator (hide "starting" as it's a transient loading state)
+  const VISIBLE_STEPS: Step[] = ["upload", "intent", "chat", "done"];
 
   return (
     <div className={step === "chat" ? "max-w-4xl" : "max-w-3xl"}>
       <div className="flex items-center justify-between mb-2">
         <h1 className="text-2xl font-bold text-gray-900">
-          {step === "chat" ? "Configure Migration" : "Upload & Migrate"}
+          {step === "intent"
+            ? "Analyze File"
+            : step === "chat"
+            ? "Configure Migration"
+            : "Upload & Migrate"}
         </h1>
-        {step === "chat" && (
+        {(step === "chat" || step === "intent") && (
           <button onClick={handleReset} className="px-3 py-1.5 text-xs text-gray-500 border border-gray-300 rounded-lg hover:bg-gray-50">
             Start over
           </button>
         )}
       </div>
       <p className="text-gray-500 mb-4 text-sm">
-        {step === "chat"
+        {step === "intent"
+          ? `Choose what you want to do with ${uploadedName}.`
+          : step === "chat"
           ? `Working on: ${uploadedName} — Tell Sunshine what you need.`
           : "Drop your source ERP file. Sunshine analyzes it and helps you transform it through conversation."}
       </p>
 
       {/* Step indicator */}
       <div className="flex items-center gap-2 mb-6">
-        {STEPS.map((s, i) => {
-          const active = step === s;
-          const past = STEPS.indexOf(step) > i;
+        {VISIBLE_STEPS.map((s, i) => {
+          const currentIdx = STEPS.indexOf(step);
+          const thisIdx = STEPS.indexOf(s);
+          const active = step === s || (step === "starting" && s === "intent");
+          const past = currentIdx > thisIdx;
           return (
             <div key={s} className="flex items-center gap-2">
               <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium transition-colors
@@ -97,7 +126,7 @@ export default function UploadPage() {
                 {past && <span>&#10003;</span>}
                 {STEP_LABELS[s]}
               </div>
-              {i < STEPS.length - 1 && <span className="text-gray-300">&rarr;</span>}
+              {i < VISIBLE_STEPS.length - 1 && <span className="text-gray-300">&rarr;</span>}
             </div>
           );
         })}
@@ -114,11 +143,19 @@ export default function UploadPage() {
         <DropZone onFilesSelected={handleFilesSelected} isUploading={isUploading} />
       )}
 
+      {step === "intent" && uploadId && (
+        <IntentAnalysis
+          uploadId={uploadId}
+          filename={uploadedName}
+          onProceed={handleProceedToChat}
+        />
+      )}
+
       {step === "starting" && (
         <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
           <div className="inline-block w-8 h-8 border-4 border-sunshine-400 border-t-transparent rounded-full animate-spin mb-4" />
-          <p className="text-gray-700 font-medium">Analyzing <span className="text-sunshine-600">{uploadedName}</span>...</p>
-          <p className="text-gray-400 text-sm mt-1">Reading all sheets, preparing transformation plan</p>
+          <p className="text-gray-700 font-medium">Preparing <span className="text-sunshine-600">{uploadedName}</span>...</p>
+          <p className="text-gray-400 text-sm mt-1">Setting up the transformation session</p>
         </div>
       )}
 

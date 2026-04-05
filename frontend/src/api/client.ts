@@ -105,6 +105,32 @@ export async function executeChat(sessionId: string, outputFilename: string) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Deterministic ingest API
+// ---------------------------------------------------------------------------
+
+export async function getIntents() {
+  return request<any[]>("/ingest/intents");
+}
+
+export async function analyzeWithIntent(uploadId: string, intent: string) {
+  return request<any>(`/ingest/analyze/${uploadId}`, {
+    method: "POST",
+    body: JSON.stringify({ intent }),
+  });
+}
+
+export async function confirmLayout(uploadId: string, intent: string, layout: any) {
+  return request<any>(`/ingest/confirm/${uploadId}`, {
+    method: "POST",
+    body: JSON.stringify({ intent, layout }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Legacy preview API
+// ---------------------------------------------------------------------------
+
 export async function previewRules(uploadId: string, rules: any[], limit = 20) {
   return request<any>(`/preview/${uploadId}`, {
     method: "POST",

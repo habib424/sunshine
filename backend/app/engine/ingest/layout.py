@@ -44,8 +44,8 @@ from app.engine.contracts.journal_entry import (
 _ROLE_KEYWORDS: dict[str, list[str]] = {
     "entry_id": [
         "journal entry id", "journal entry no", "entry id", "entry no",
-        "doc number", "document no", "document number", "je number",
-        "voucher no", "voucher",
+        "journal id", "doc number", "document no", "document number",
+        "je number", "voucher no", "voucher",
     ],
     "date": [
         "posting date", "document date", "doc date", "entry date",
