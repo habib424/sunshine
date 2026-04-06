@@ -26,16 +26,38 @@ async def start_chat(upload_id: str, body: dict = None, db: AsyncSession = Depen
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found on disk")
 
+    intent = (body or {}).get("intent", "convert_to_light_je")
     goal = (body or {}).get("goal", "journal_entry")
+
+    # Run quick deterministic layout detection so the AI starts with
+    # real knowledge about the file instead of guessing from scratch.
+    layout_context = _build_layout_context(file_path, intent)
 
     try:
         result = create_session(file_path, goal=goal)
-        # Send the initial message to get the AI's first analysis
-        initial = chat(result["session_id"],
-            f"I've uploaded '{upload.original_name}'. "
-            f"My goal is to generate a Light journal entry upload file from this data. "
-            f"Please analyze the file and propose a transformation plan."
+
+        # Build a grounded initial message that includes what the
+        # detector already knows, so the AI doesn't re-guess.
+        initial_msg = (
+            f"I've uploaded '{upload.original_name}'.\n\n"
+            f"My intent is: {intent}.\n\n"
         )
+        if layout_context:
+            initial_msg += (
+                f"The deterministic layout detector has already analyzed the file "
+                f"and found the following. Use these findings as facts — do NOT "
+                f"re-guess or contradict them:\n\n{layout_context}\n\n"
+                f"Based on these confirmed mappings, propose a transformation plan "
+                f"that uses the detected columns. For any columns the detector "
+                f"could NOT map, look at the actual data and propose specific "
+                f"mappings with reasoning."
+            )
+        else:
+            initial_msg += (
+                f"Please analyze the file and propose a transformation plan."
+            )
+
+        initial = chat(result["session_id"], initial_msg)
         return {
             "session_id": result["session_id"],
             "sheet_names": result["sheet_names"],
@@ -44,6 +66,41 @@ async def start_chat(upload_id: str, body: dict = None, db: AsyncSession = Depen
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _build_layout_context(file_path: Path, intent: str) -> str:
+    """Run the deterministic layout detector and format findings for the AI."""
+    try:
+        from app.engine.ingest.orchestrator import ingest
+        result = ingest(file_path, intent)
+
+        lines = []
+        layout = result.layout
+        lines.append(f"- Detected sheet: '{layout.get('sheet')}'")
+        lines.append(f"- Header row: {layout.get('header_row')}")
+        lines.append(f"- Confidence: {result.confidence}")
+
+        roles = layout.get("column_roles", {})
+        if roles:
+            lines.append("- CONFIRMED column mappings (use these exactly):")
+            for src_col, canonical in roles.items():
+                lines.append(f"    '{src_col}' → {canonical}")
+
+        missing = layout.get("missing_required", [])
+        if missing:
+            lines.append(f"- UNMAPPED required columns (you must find or derive): {missing}")
+
+        unmapped = layout.get("unmapped_columns", [])
+        if unmapped:
+            lines.append(f"- Source columns with no assigned role: {unmapped}")
+            lines.append(
+                "  Look at these columns to find mappings for the unmapped "
+                "required columns above. Examine actual data values, not just names."
+            )
+
+        return "\n".join(lines)
+    except Exception:
+        return ""
 
 
 @router.post("/message/{session_id}")

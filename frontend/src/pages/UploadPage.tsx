@@ -1,11 +1,17 @@
 import { useState, useEffect } from "react";
 import DropZone from "../components/upload/DropZone";
-import IntentAnalysis from "../components/upload/IntentAnalysis";
 import TransformChat from "../components/chat/TransformChat";
-import { uploadFiles, startChat, getExportUrl } from "../api/client";
+import { uploadFiles, startChat, getExportUrl, getIntents } from "../api/client";
 import { useAppStore } from "../stores/appStore";
+import { Target, FileSearch, GitCompare, Loader2 } from "lucide-react";
 
 type Step = "upload" | "intent" | "starting" | "chat" | "done";
+
+const INTENT_ICONS: Record<string, typeof Target> = {
+  convert_to_light_je: Target,
+  validate_je: FileSearch,
+  reconcile_je_to_gl: GitCompare,
+};
 
 export default function UploadPage() {
   const { addUploads, setUploads } = useAppStore();
@@ -13,6 +19,8 @@ export default function UploadPage() {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadId, setUploadId] = useState<string | null>(null);
   const [uploadedName, setUploadedName] = useState("");
+  const [selectedIntent, setSelectedIntent] = useState<string | null>(null);
+  const [intents, setIntents] = useState<any[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [initialMessage, setInitialMessage] = useState("");
   const [initialHasScript, setInitialHasScript] = useState(false);
@@ -23,6 +31,7 @@ export default function UploadPage() {
     setStep("upload");
     setError(null);
     setUploads([]);
+    getIntents().then(setIntents).catch(() => {});
   }, [setUploads]);
 
   const handleFilesSelected = async (files: File[]) => {
@@ -35,7 +44,6 @@ export default function UploadPage() {
       addUploads(uploaded);
       setUploadId(u.id);
       setUploadedName(u.original_name);
-      // Go to intent selection instead of jumping straight to chat
       setStep("intent");
     } catch (e: any) {
       setError(e.message || "Unknown error");
@@ -45,18 +53,19 @@ export default function UploadPage() {
     }
   };
 
-  const handleProceedToChat = async () => {
+  const handleIntentSelected = async (intent: string) => {
     if (!uploadId) return;
+    setSelectedIntent(intent);
     setStep("starting");
     setError(null);
     try {
-      const chat = await startChat(uploadId);
+      const chat = await startChat(uploadId, intent);
       setSessionId(chat.session_id);
       setInitialMessage(chat.message);
       setInitialHasScript(chat.has_script || false);
       setStep("chat");
     } catch (e: any) {
-      setError(e.message || "Failed to start chat session");
+      setError(e.message || "Failed to start session");
       setStep("intent");
     }
   };
@@ -72,31 +81,25 @@ export default function UploadPage() {
     setInitialMessage("");
     setUploadedName("");
     setUploadId(null);
+    setSelectedIntent(null);
     setJobId(null);
     setError(null);
   };
 
-  const STEPS: Step[] = ["upload", "intent", "starting", "chat", "done"];
+  const VISIBLE_STEPS: Step[] = ["upload", "intent", "chat", "done"];
   const STEP_LABELS: Record<Step, string> = {
     upload: "Upload",
-    intent: "Analyze",
+    intent: "Intent",
     starting: "Preparing",
     chat: "Configure",
     done: "Download",
   };
 
-  // Steps to show in the indicator (hide "starting" as it's a transient loading state)
-  const VISIBLE_STEPS: Step[] = ["upload", "intent", "chat", "done"];
-
   return (
     <div className={step === "chat" ? "max-w-4xl" : "max-w-3xl"}>
       <div className="flex items-center justify-between mb-2">
         <h1 className="text-2xl font-bold text-gray-900">
-          {step === "intent"
-            ? "Analyze File"
-            : step === "chat"
-            ? "Configure Migration"
-            : "Upload & Migrate"}
+          {step === "intent" ? "What do you need?" : step === "chat" ? "Configure Migration" : "Upload & Migrate"}
         </h1>
         {(step === "chat" || step === "intent") && (
           <button onClick={handleReset} className="px-3 py-1.5 text-xs text-gray-500 border border-gray-300 rounded-lg hover:bg-gray-50">
@@ -106,17 +109,17 @@ export default function UploadPage() {
       </div>
       <p className="text-gray-500 mb-4 text-sm">
         {step === "intent"
-          ? `Choose what you want to do with ${uploadedName}.`
+          ? `Choose what to do with ${uploadedName}`
           : step === "chat"
-          ? `Working on: ${uploadedName} — Tell Sunshine what you need.`
+          ? `Working on: ${uploadedName}`
           : "Drop your source ERP file. Sunshine analyzes it and helps you transform it through conversation."}
       </p>
 
       {/* Step indicator */}
       <div className="flex items-center gap-2 mb-6">
         {VISIBLE_STEPS.map((s, i) => {
-          const currentIdx = STEPS.indexOf(step);
-          const thisIdx = STEPS.indexOf(s);
+          const currentIdx = ["upload", "intent", "starting", "chat", "done"].indexOf(step);
+          const thisIdx = ["upload", "intent", "starting", "chat", "done"].indexOf(s);
           const active = step === s || (step === "starting" && s === "intent");
           const past = currentIdx > thisIdx;
           return (
@@ -143,19 +146,34 @@ export default function UploadPage() {
         <DropZone onFilesSelected={handleFilesSelected} isUploading={isUploading} />
       )}
 
-      {step === "intent" && uploadId && (
-        <IntentAnalysis
-          uploadId={uploadId}
-          filename={uploadedName}
-          onProceed={handleProceedToChat}
-        />
+      {step === "intent" && (
+        <div className="bg-white rounded-xl border border-gray-200 p-6">
+          <div className="grid gap-3">
+            {intents.map((intent) => {
+              const Icon = INTENT_ICONS[intent.name] || Target;
+              return (
+                <button
+                  key={intent.name}
+                  onClick={() => handleIntentSelected(intent.name)}
+                  className="flex items-start gap-3 p-4 rounded-lg border border-gray-200 hover:border-sunshine-400 hover:bg-sunshine-50 text-left transition-all cursor-pointer"
+                >
+                  <Icon className="w-5 h-5 mt-0.5 flex-shrink-0 text-gray-400" />
+                  <div>
+                    <div className="text-sm font-medium text-gray-800">{intent.label}</div>
+                    <div className="text-xs text-gray-400 mt-0.5">{intent.description}</div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
       )}
 
       {step === "starting" && (
         <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
-          <div className="inline-block w-8 h-8 border-4 border-sunshine-400 border-t-transparent rounded-full animate-spin mb-4" />
-          <p className="text-gray-700 font-medium">Preparing <span className="text-sunshine-600">{uploadedName}</span>...</p>
-          <p className="text-gray-400 text-sm mt-1">Setting up the transformation session</p>
+          <Loader2 className="w-8 h-8 text-sunshine-400 animate-spin mx-auto mb-4" />
+          <p className="text-gray-700 font-medium">Analyzing <span className="text-sunshine-600">{uploadedName}</span>...</p>
+          <p className="text-gray-400 text-sm mt-1">Detecting file structure and preparing transformation plan</p>
         </div>
       )}
 
