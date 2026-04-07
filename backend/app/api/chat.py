@@ -36,26 +36,17 @@ async def start_chat(upload_id: str, body: dict = None, db: AsyncSession = Depen
     try:
         result = create_session(file_path, goal=goal)
 
-        # Build a grounded initial message that includes what the
-        # detector already knows, so the AI doesn't re-guess.
-        initial_msg = (
-            f"I've uploaded '{upload.original_name}'.\n\n"
-            f"My intent is: {intent}.\n\n"
-        )
+        # Build a grounded initial message whose task matches the intent.
+        initial_msg = f"I've uploaded '{upload.original_name}'.\n\n"
+
         if layout_context:
             initial_msg += (
                 f"The deterministic layout detector has already analyzed the file "
                 f"and found the following. Use these findings as facts — do NOT "
                 f"re-guess or contradict them:\n\n{layout_context}\n\n"
-                f"Based on these confirmed mappings, propose a transformation plan "
-                f"that uses the detected columns. For any columns the detector "
-                f"could NOT map, look at the actual data and propose specific "
-                f"mappings with reasoning."
             )
-        else:
-            initial_msg += (
-                f"Please analyze the file and propose a transformation plan."
-            )
+
+        initial_msg += _intent_instruction(intent)
 
         initial = chat(result["session_id"], initial_msg)
         return {
@@ -101,6 +92,38 @@ def _build_layout_context(file_path: Path, intent: str) -> str:
         return "\n".join(lines)
     except Exception:
         return ""
+
+
+def _intent_instruction(intent: str) -> str:
+    """Return the task instruction for the AI based on the user's intent."""
+    if intent == "validate_je":
+        return (
+            "My intent is to VALIDATE this file — NOT to transform it.\n\n"
+            "Check the file against journal entry rules:\n"
+            "1. For each entry (same entry ID), do all lines have the same date, currency, and business partner?\n"
+            "2. Does each entry balance to zero (sum of debits = sum of credits)?\n"
+            "3. Are all GL accounts valid?\n"
+            "4. Are there any missing required fields?\n"
+            "5. Are there any data quality issues (invalid dates, unknown currencies, etc.)?\n\n"
+            "Report what you find as a structured validation report. "
+            "Do NOT propose a transformation plan. Do NOT generate a script. "
+            "Just tell me what's right and what's wrong with this file."
+        )
+    elif intent == "reconcile_je_to_gl":
+        return (
+            "My intent is to RECONCILE this journal entry file against a GL extract.\n\n"
+            "Analyze the file structure and tell me what you can match and what's unmatched. "
+            "Do NOT propose a transformation plan."
+        )
+    else:
+        # Default: convert_to_light_je
+        return (
+            "My intent is to CONVERT this file to Light.inc journal entry format.\n\n"
+            "Based on the confirmed column mappings, propose a transformation plan "
+            "that uses the detected columns. For any columns the detector "
+            "could NOT map, look at the actual data and propose specific "
+            "mappings with reasoning."
+        )
 
 
 @router.post("/message/{session_id}")
