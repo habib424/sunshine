@@ -15,6 +15,7 @@ learned rules store for that code. Treat them as a public API.
 ISSUE_CODES = {
     "JE-MISSING-FIELD":     "A required column is absent from the file",
     "JE-EMPTY-FIELD":       "A required field is empty on a given line",
+    "JE-NO-AMOUNT":         "A line has neither debit nor credit populated",
     "JE-MIXED-DATE":        "Lines of the same entry have different dates",
     "JE-MIXED-CURRENCY":    "Lines of the same entry have different currencies",
     "JE-MIXED-PARTNER":     "Lines of the same entry have different business partners",
@@ -52,10 +53,12 @@ JOURNAL_ENTRY_CONTRACT = {
         "entry_id",
         "date",
         "currency",
-        "debit",
-        "credit",
         "gl_account",
     ],
+    # Debit and credit are NOT in required_columns because a JE line
+    # legitimately has one or the other, not both. The JE-NO-AMOUNT
+    # check handles the rule: at least one must be populated per line.
+    "amount_columns": ["debit", "credit"],
     "per_group_invariants": [
         # Each (issue_code, column) pair the validator will check.
         {"issue_code": "JE-MIXED-DATE",        "column": "date"},

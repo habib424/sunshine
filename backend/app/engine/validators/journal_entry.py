@@ -108,6 +108,40 @@ def _check_empty_fields(df: pd.DataFrame) -> list[dict]:
     return issues
 
 
+def _check_amounts(df: pd.DataFrame) -> list[dict]:
+    """Check that each line has at least one of debit or credit populated."""
+    amount_cols = JOURNAL_ENTRY_CONTRACT.get("amount_columns", ["debit", "credit"])
+    present = [c for c in amount_cols if c in df.columns]
+    if not present:
+        return []
+
+    issues: list[dict] = []
+    for idx in df.index:
+        has_amount = False
+        for col in present:
+            val = df.at[idx, col]
+            if pd.notna(val):
+                try:
+                    if float(val) != 0:
+                        has_amount = True
+                        break
+                except (ValueError, TypeError):
+                    pass
+        if not has_amount:
+            issues.append(
+                _issue(
+                    "JE-NO-AMOUNT",
+                    "error",
+                    "line",
+                    "Line has neither debit nor credit amount",
+                    entry_id=_safe_str(df.at[idx, "entry_id"]) if "entry_id" in df.columns else None,
+                    row_number=int(idx) + 2,
+                    column="debit/credit",
+                )
+            )
+    return issues
+
+
 def _check_per_group_consistency(df: pd.DataFrame) -> list[dict]:
     """
     For each group of lines sharing an entry_id, verify that the columns
@@ -300,6 +334,7 @@ def journal_entry_contract(df: pd.DataFrame, params: dict) -> list[dict]:
         return missing
 
     issues.extend(_check_empty_fields(df))
+    issues.extend(_check_amounts(df))
     issues.extend(_check_per_group_consistency(df))
     issues.extend(_check_balance(df))
     issues.extend(_check_dates(df))
