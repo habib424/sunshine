@@ -5,6 +5,7 @@ import { Target, FileSearch, GitCompare, CheckCircle2, AlertTriangle, XCircle, L
 interface Props {
   uploadId: string;
   filename: string;
+  intent?: string;
   onProceed: () => void;
 }
 
@@ -19,32 +20,31 @@ const SEVERITY_CONFIG = {
   warning: { icon: AlertTriangle, color: "text-amber-600", bg: "bg-amber-50", border: "border-amber-200" },
 };
 
-export default function IntentAnalysis({ uploadId, filename, onProceed }: Props) {
-  const [intents, setIntents] = useState<any[]>([]);
-  const [selectedIntent, setSelectedIntent] = useState<string | null>(null);
+export default function IntentAnalysis({ uploadId, filename, intent, onProceed }: Props) {
   const [analyzing, setAnalyzing] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [expandedCode, setExpandedCode] = useState<string | null>(null);
 
+  // Auto-run analysis on mount when intent is provided
   useEffect(() => {
-    getIntents().then(setIntents).catch(() => {});
-  }, []);
+    if (intent && !result && !analyzing) {
+      runAnalysis(intent);
+    }
+  }, [intent]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleReset = () => {
-    setSelectedIntent(null);
     setResult(null);
     setError(null);
     setExpandedCode(null);
   };
 
-  const handleAnalyze = async (intent: string) => {
-    setSelectedIntent(intent);
+  const runAnalysis = async (intentName: string) => {
     setAnalyzing(true);
     setResult(null);
     setError(null);
     try {
-      const res = await analyzeWithIntent(uploadId, intent);
+      const res = await analyzeWithIntent(uploadId, intentName);
       setResult(res);
     } catch (e: any) {
       setError(e.message || "Analysis failed");
@@ -53,51 +53,22 @@ export default function IntentAnalysis({ uploadId, filename, onProceed }: Props)
     }
   };
 
+  const selectedIntent = intent || null;
+
   const issueSummary = result?.issue_summary ? Object.values(result.issue_summary) as any[] : [];
   const errorCount = issueSummary.filter((s: any) => s.severity === "error").reduce((a: number, s: any) => a + s.count, 0);
   const warningCount = issueSummary.filter((s: any) => s.severity === "warning").reduce((a: number, s: any) => a + s.count, 0);
 
   return (
     <div className="space-y-4">
-      {/* Intent Selection */}
-      <div className="bg-white rounded-xl border border-gray-200 p-6">
-        <h3 className="text-sm font-semibold text-gray-900 mb-1">What do you want to do with this file?</h3>
-        <p className="text-xs text-gray-400 mb-4">
-          Working on: <span className="font-medium text-gray-600">{filename}</span>
-        </p>
-
-        <div className="grid gap-3">
-          {intents.map((intent) => {
-            const Icon = INTENT_ICONS[intent.name] || Target;
-            const isSelected = selectedIntent === intent.name;
-            return (
-              <button
-                key={intent.name}
-                onClick={() => handleAnalyze(intent.name)}
-                disabled={analyzing}
-                className={`flex items-start gap-3 p-4 rounded-lg border text-left transition-all
-                  ${isSelected
-                    ? "border-sunshine-400 bg-sunshine-50 ring-1 ring-sunshine-300"
-                    : "border-gray-200 hover:border-sunshine-300 hover:bg-gray-50"
-                  }
-                  ${analyzing ? "opacity-60 cursor-wait" : "cursor-pointer"}
-                `}
-              >
-                <Icon className={`w-5 h-5 mt-0.5 flex-shrink-0 ${isSelected ? "text-sunshine-600" : "text-gray-400"}`} />
-                <div>
-                  <div className={`text-sm font-medium ${isSelected ? "text-sunshine-800" : "text-gray-800"}`}>
-                    {intent.label}
-                  </div>
-                  <div className="text-xs text-gray-400 mt-0.5">{intent.description}</div>
-                </div>
-                {isSelected && analyzing && (
-                  <Loader2 className="w-4 h-4 ml-auto animate-spin text-sunshine-500 flex-shrink-0" />
-                )}
-              </button>
-            );
-          })}
+      {/* Loading */}
+      {analyzing && (
+        <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
+          <Loader2 className="w-8 h-8 text-sunshine-400 animate-spin mx-auto mb-4" />
+          <p className="text-gray-700 font-medium">Running deterministic validation...</p>
+          <p className="text-gray-400 text-sm mt-1">Checking contract rules against {filename}</p>
         </div>
-      </div>
+      )}
 
       {/* Error */}
       {error && (

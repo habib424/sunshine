@@ -1,11 +1,12 @@
 import { useState, useEffect } from "react";
 import DropZone from "../components/upload/DropZone";
+import IntentAnalysis from "../components/upload/IntentAnalysis";
 import TransformChat from "../components/chat/TransformChat";
 import { uploadFiles, startChat, getExportUrl, getIntents } from "../api/client";
 import { useAppStore } from "../stores/appStore";
 import { Target, FileSearch, GitCompare, Loader2 } from "lucide-react";
 
-type Step = "upload" | "intent" | "starting" | "chat" | "done";
+type Step = "upload" | "intent" | "starting" | "analyze" | "chat" | "done";
 
 const INTENT_ICONS: Record<string, typeof Target> = {
   convert_to_light_je: Target,
@@ -31,8 +32,16 @@ export default function UploadPage() {
     setStep("upload");
     setError(null);
     setUploads([]);
-    getIntents().then(setIntents).catch(() => {});
   }, [setUploads]);
+
+  // Fetch intents when entering the intent step
+  useEffect(() => {
+    if (step === "intent" && intents.length === 0) {
+      getIntents()
+        .then(setIntents)
+        .catch((e) => setError(e.message || "Failed to load intents"));
+    }
+  }, [step, intents.length]);
 
   const handleFilesSelected = async (files: File[]) => {
     if (files.length === 0) return;
@@ -56,17 +65,40 @@ export default function UploadPage() {
   const handleIntentSelected = async (intent: string) => {
     if (!uploadId) return;
     setSelectedIntent(intent);
+    setError(null);
+
+    if (intent === "validate_je") {
+      // Validation uses the deterministic analysis — no AI chat needed
+      setStep("analyze");
+    } else {
+      // Convert / reconcile go through the AI chat with detector grounding
+      setStep("starting");
+      try {
+        const chatResult = await startChat(uploadId, intent);
+        setSessionId(chatResult.session_id);
+        setInitialMessage(chatResult.message);
+        setInitialHasScript(chatResult.has_script || false);
+        setStep("chat");
+      } catch (e: any) {
+        setError(e.message || "Failed to start session");
+        setStep("intent");
+      }
+    }
+  };
+
+  const handleProceedToChat = async () => {
+    if (!uploadId || !selectedIntent) return;
     setStep("starting");
     setError(null);
     try {
-      const chat = await startChat(uploadId, intent);
-      setSessionId(chat.session_id);
-      setInitialMessage(chat.message);
-      setInitialHasScript(chat.has_script || false);
+      const chatResult = await startChat(uploadId, selectedIntent);
+      setSessionId(chatResult.session_id);
+      setInitialMessage(chatResult.message);
+      setInitialHasScript(chatResult.has_script || false);
       setStep("chat");
     } catch (e: any) {
       setError(e.message || "Failed to start session");
-      setStep("intent");
+      setStep("analyze");
     }
   };
 
@@ -86,11 +118,14 @@ export default function UploadPage() {
     setError(null);
   };
 
-  const VISIBLE_STEPS: Step[] = ["upload", "intent", "chat", "done"];
+  const VISIBLE_STEPS: Step[] = selectedIntent === "validate_je"
+    ? ["upload", "intent", "analyze", "done"]
+    : ["upload", "intent", "chat", "done"];
   const STEP_LABELS: Record<Step, string> = {
     upload: "Upload",
     intent: "Intent",
     starting: "Preparing",
+    analyze: "Analyze",
     chat: "Configure",
     done: "Download",
   };
@@ -99,9 +134,9 @@ export default function UploadPage() {
     <div className={step === "chat" ? "max-w-4xl" : "max-w-3xl"}>
       <div className="flex items-center justify-between mb-2">
         <h1 className="text-2xl font-bold text-gray-900">
-          {step === "intent" ? "What do you need?" : step === "chat" ? "Configure Migration" : "Upload & Migrate"}
+          {step === "intent" ? "What do you need?" : step === "analyze" ? "Validation Report" : step === "chat" ? "Configure Migration" : "Upload & Migrate"}
         </h1>
-        {(step === "chat" || step === "intent") && (
+        {(step === "chat" || step === "intent" || step === "analyze") && (
           <button onClick={handleReset} className="px-3 py-1.5 text-xs text-gray-500 border border-gray-300 rounded-lg hover:bg-gray-50">
             Start over
           </button>
@@ -110,6 +145,8 @@ export default function UploadPage() {
       <p className="text-gray-500 mb-4 text-sm">
         {step === "intent"
           ? `Choose what to do with ${uploadedName}`
+          : step === "analyze"
+          ? `Deterministic validation of ${uploadedName}`
           : step === "chat"
           ? `Working on: ${uploadedName}`
           : "Drop your source ERP file. Sunshine analyzes it and helps you transform it through conversation."}
@@ -148,6 +185,12 @@ export default function UploadPage() {
 
       {step === "intent" && (
         <div className="bg-white rounded-xl border border-gray-200 p-6">
+          {intents.length === 0 && !error && (
+            <div className="text-center py-4">
+              <Loader2 className="w-6 h-6 text-sunshine-400 animate-spin mx-auto mb-2" />
+              <p className="text-sm text-gray-400">Loading options...</p>
+            </div>
+          )}
           <div className="grid gap-3">
             {intents.map((intent) => {
               const Icon = INTENT_ICONS[intent.name] || Target;
@@ -167,6 +210,15 @@ export default function UploadPage() {
             })}
           </div>
         </div>
+      )}
+
+      {step === "analyze" && uploadId && selectedIntent && (
+        <IntentAnalysis
+          uploadId={uploadId}
+          filename={uploadedName}
+          intent={selectedIntent}
+          onProceed={handleProceedToChat}
+        />
       )}
 
       {step === "starting" && (
