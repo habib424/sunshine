@@ -131,6 +131,44 @@ export async function confirmLayout(uploadId: string, intent: string, layout: an
 }
 
 // ---------------------------------------------------------------------------
+// Validation rules API
+// ---------------------------------------------------------------------------
+
+export async function getRulesContracts() {
+  return request<string[]>("/rules/contracts");
+}
+
+export async function getRules(contract: string) {
+  return request<any>(`/rules/${contract}`);
+}
+
+export async function getRule(contract: string, ruleId: string) {
+  return request<any>(`/rules/${contract}/${ruleId}`);
+}
+
+export async function updateRule(contract: string, ruleId: string, updates: any) {
+  return request<any>(`/rules/${contract}/${ruleId}`, {
+    method: "PATCH",
+    body: JSON.stringify(updates),
+  });
+}
+
+export async function createRule(contract: string, rule: any) {
+  return request<any>(`/rules/${contract}`, {
+    method: "POST",
+    body: JSON.stringify(rule),
+  });
+}
+
+export async function deleteRule(contract: string, ruleId: string) {
+  return request<any>(`/rules/${contract}/${ruleId}`, { method: "DELETE" });
+}
+
+export async function getCheckTypes() {
+  return request<any>("/rules/check-types");
+}
+
+// ---------------------------------------------------------------------------
 // Legacy preview API
 // ---------------------------------------------------------------------------
 

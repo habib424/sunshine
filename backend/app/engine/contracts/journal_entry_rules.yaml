@@ -1,0 +1,144 @@
+contract: journal_entry
+version: 1
+grain: entry_id
+canonical_columns:
+  entry_id: Groups lines belonging to the same journal entry
+  date: Posting date of the line
+  currency: ISO 4217 currency code
+  debit: Debit amount (numeric, >= 0)
+  credit: Credit amount (numeric, >= 0)
+  gl_account: General ledger account code
+  business_partner: Business partner name or id
+  entry_description: Description applying to the whole entry
+  line_description: Description applying to a single line
+rules:
+- id: missing-required-columns
+  issue_code: JE-MISSING-FIELD
+  description: A required column is absent from the file
+  check_type: required_columns
+  severity: error
+  scope: file
+  enabled: true
+  phase: structural
+  params:
+    columns:
+    - entry_id
+    - date
+    - currency
+    - gl_account
+- id: empty-required-fields
+  issue_code: JE-EMPTY-FIELD
+  description: A required field is empty on a given line
+  check_type: non_empty
+  severity: error
+  scope: line
+  enabled: true
+  phase: line
+  params:
+    columns:
+    - entry_id
+    - date
+    - currency
+    - gl_account
+- id: no-amount
+  issue_code: JE-NO-AMOUNT
+  description: A line has neither debit nor credit populated
+  check_type: at_least_one_populated
+  severity: error
+  scope: line
+  enabled: true
+  phase: line
+  params:
+    columns:
+    - debit
+    - credit
+    nonzero: true
+- id: invalid-date
+  issue_code: JE-INVALID-DATE
+  description: A date value cannot be parsed
+  check_type: parseable_date
+  severity: error
+  scope: line
+  enabled: true
+  phase: line
+  params:
+    column: date
+- id: invalid-currency
+  issue_code: JE-INVALID-CURRENCY
+  description: A currency code is not a recognised ISO 4217 code
+  check_type: value_in_set
+  severity: error
+  scope: line
+  enabled: true
+  phase: line
+  params:
+    column: currency
+    allowed_set: iso_4217
+    normalize: uppercase
+- id: unknown-gl
+  issue_code: JE-UNKNOWN-GL
+  description: A GL account is not in the chart of accounts or mapping table
+  check_type: value_in_set
+  severity: error
+  scope: line
+  enabled: true
+  phase: line
+  params:
+    column: gl_account
+    allowed_set: null
+    runtime_param: chart_of_accounts
+    fallback_param: gl_mapping
+- id: mixed-date
+  issue_code: JE-MIXED-DATE
+  description: Lines of the same entry have different dates
+  check_type: group_consistency
+  severity: error
+  scope: entry
+  enabled: true
+  phase: group
+  params:
+    column: date
+- id: mixed-currency
+  issue_code: JE-MIXED-CURRENCY
+  description: Lines of the same entry have different currencies
+  check_type: group_consistency
+  severity: error
+  scope: entry
+  enabled: true
+  phase: group
+  params:
+    column: currency
+- id: mixed-partner
+  issue_code: JE-MIXED-PARTNER
+  description: Lines of the same entry have different business partners
+  check_type: group_consistency
+  severity: warning
+  scope: entry
+  enabled: true
+  phase: group
+  params:
+    column: business_partner
+- id: mixed-description
+  issue_code: JE-MIXED-DESCRIPTION
+  description: Lines of the same entry have different entry descriptions
+  check_type: group_consistency
+  severity: warning
+  scope: entry
+  enabled: true
+  phase: group
+  params:
+    column: entry_description
+- id: unbalanced
+  issue_code: JE-UNBALANCED
+  description: Sum of debits and credits for an entry does not net to zero
+  check_type: group_balance
+  severity: error
+  scope: entry
+  enabled: true
+  phase: group
+  params:
+    debit_column: debit
+    credit_column: credit
+    tolerance: 0.01
+tolerances:
+  balance: 0.01

@@ -29,6 +29,8 @@ You are working with a specific uploaded file. Here is its structure:
 The target format is the Light.inc journal entry upload with these columns:
 {target_columns}
 
+{validation_rules}
+
 Your job:
 1. Analyze the file and propose a clear, numbered transformation plan
 2. Listen to the user's feedback and adjust the plan
@@ -48,10 +50,29 @@ RULES FOR THE SCRIPT (when user says "run it", "go", "execute", "looks good", et
 - Return a DataFrame with the exact target columns
 - Handle edge cases (NaN values, type conversion, missing data)
 - Do NOT print anything, just return the DataFrame
+- CRITICAL: The output MUST satisfy the validation rules listed above. Do NOT drop rows. Do NOT change numeric totals. Preserve every row from the source.
 
 When generating the script, wrap it in a ```python code block.
 
 IMPORTANT: Only generate the script when the user explicitly approves the plan. Until then, just discuss and refine the plan."""
+
+
+def _get_validation_rules_context() -> str:
+    """Build a summary of active validation rules for the AI system prompt."""
+    try:
+        from app.engine.contracts.loader import load_rules
+        ruleset = load_rules("journal_entry")
+        lines = [
+            "ACTIVE VALIDATION RULES (the output will be checked against these):"
+        ]
+        for rule in ruleset.enabled_rules:
+            lines.append(
+                f"  - [{rule['severity'].upper()}] {rule['issue_code']}: "
+                f"{rule['description']} (scope: {rule['scope']})"
+            )
+        return "\n".join(lines)
+    except Exception:
+        return ""
 
 
 def _read_file_structure(file_path: Path) -> dict:
@@ -76,6 +97,7 @@ def create_session(file_path: Path, goal: str = "journal_entry") -> dict:
     system = SYSTEM_PROMPT.format(
         file_structure=json.dumps(file_structure, indent=2),
         target_columns=json.dumps(target.get("columns", []), indent=2),
+        validation_rules=_get_validation_rules_context(),
     )
 
     _sessions[session_id] = {

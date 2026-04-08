@@ -310,35 +310,51 @@ def _safe_str(value) -> str | None:
 @register_validator("journal_entry_contract")
 def journal_entry_contract(df: pd.DataFrame, params: dict) -> list[dict]:
     """
-    Run every Journal Entry contract check against a canonicalised DataFrame.
+    Run Journal Entry validation checks loaded from YAML.
+
+    The function signature is unchanged from the original. Internally,
+    it loads rules from journal_entry_rules.yaml and dispatches to
+    registered check executors. The YAML defines WHICH checks to run
+    with WHAT parameters; the Python check types implement HOW.
 
     Params:
         chart_of_accounts: iterable of valid GL account codes. Optional.
         gl_mapping: dict of source-code -> target-code. Optional.
-        allowed_currencies: iterable of ISO 4217 codes. Defaults to a small
-            built-in set if not provided.
+        allowed_currencies: iterable of ISO 4217 codes. Optional.
     """
-    coa = set(str(c) for c in params.get("chart_of_accounts") or [])
-    mapping = {str(k): str(v) for k, v in (params.get("gl_mapping") or {}).items()}
-    allowed_currencies = set(
-        str(c).upper() for c in (params.get("allowed_currencies") or _DEFAULT_ISO_CURRENCIES)
-    )
+    from app.engine.contracts.loader import load_rules
+    from app.engine.checks import get_check_executor
+
+    ruleset = load_rules("journal_entry")
+
+    # Build runtime context from caller params (same keys as before).
+    runtime = {
+        "grain": ruleset.grain,
+        "chart_of_accounts": set(str(c) for c in params.get("chart_of_accounts") or []),
+        "gl_mapping": {str(k): str(v) for k, v in (params.get("gl_mapping") or {}).items()},
+        "allowed_currencies": set(
+            str(c).upper() for c in (params.get("allowed_currencies") or _DEFAULT_ISO_CURRENCIES)
+        ),
+    }
 
     issues: list[dict] = []
 
-    # Structural checks first. If required columns are missing, downstream
-    # line-level checks on those columns would be noisy and duplicative, so
-    # we return early with just the structural issues.
-    missing = _missing_required_columns(df)
-    if missing:
-        return missing
+    # Phase 1: structural (short-circuit on failure)
+    for rule in ruleset.structural_rules:
+        executor = get_check_executor(rule["check_type"])
+        found = executor.execute(df, rule, runtime)
+        issues.extend(found)
+    if issues:
+        return issues
 
-    issues.extend(_check_empty_fields(df))
-    issues.extend(_check_amounts(df))
-    issues.extend(_check_per_group_consistency(df))
-    issues.extend(_check_balance(df))
-    issues.extend(_check_dates(df))
-    issues.extend(_check_currencies(df, allowed_currencies))
-    issues.extend(_check_gl_accounts(df, coa, mapping))
+    # Phase 2: line-level checks
+    for rule in ruleset.line_rules:
+        executor = get_check_executor(rule["check_type"])
+        issues.extend(executor.execute(df, rule, runtime))
+
+    # Phase 3: group-level checks
+    for rule in ruleset.group_rules:
+        executor = get_check_executor(rule["check_type"])
+        issues.extend(executor.execute(df, rule, runtime))
 
     return issues
