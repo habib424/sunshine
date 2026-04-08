@@ -11,6 +11,8 @@ Endpoints:
     DELETE /api/rules/{contract}/{id}  — remove a rule
 """
 
+import json
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -52,6 +54,52 @@ async def get_contracts():
 @router.get("/check-types")
 async def get_check_types():
     return list_check_types()
+
+
+class GenerateRequest(BaseModel):
+    contract: str
+    description: str
+
+
+@router.post("/generate")
+async def generate_rule_endpoint(body: GenerateRequest):
+    """Use AI to generate a rule definition from a plain-language description."""
+    try:
+        ruleset = load_rules(body.contract)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No rules for contract '{body.contract}'")
+
+    check_types = list_check_types()
+    existing_ids = [r["id"] for r in ruleset.rules]
+    existing_codes = [r["issue_code"] for r in ruleset.rules]
+
+    prompt = _build_generate_prompt(
+        body.description,
+        body.contract,
+        ruleset.canonical_columns,
+        check_types,
+        existing_ids,
+        existing_codes,
+    )
+
+    try:
+        from app.ai.client import get_client
+        client = get_client()
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = response.content[0].text
+        rule = _extract_json(text)
+        if not rule:
+            raise HTTPException(status_code=422, detail="AI did not produce a valid rule definition")
+        explanation = text.split("```")[0].strip() if "```" in text else ""
+        return {"rule": rule, "explanation": explanation}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI generation failed: {str(e)}")
 
 
 @router.get("/{contract}")
@@ -152,3 +200,69 @@ async def delete_rule(contract: str, rule_id: str):
     save_rules(ruleset)
     reload_rules(contract)
     return {"status": "deleted", "rule_id": rule_id}
+
+
+
+# -- Helper functions for AI rule generation --
+
+
+def _build_generate_prompt(
+    description: str,
+    contract: str,
+    canonical_columns: dict,
+    check_types: dict,
+    existing_ids: list,
+    existing_codes: list,
+) -> str:
+    types_desc = "\n".join(
+        f"  - {name}: {info['description']}\n    params schema: {json.dumps(info['schema'])}"
+        for name, info in check_types.items()
+    )
+    columns_desc = "\n".join(f"  - {col}: {desc}" for col, desc in canonical_columns.items())
+
+    return f"""You are a validation rule generator for an ERP data migration tool.
+
+The user wants to add a new validation rule described as:
+"{description}"
+
+Available check types (you MUST use one of these):
+{types_desc}
+
+Available canonical columns in the data:
+{columns_desc}
+
+Existing rule IDs (do NOT reuse): {existing_ids}
+Existing issue codes (do NOT reuse): {existing_codes}
+
+Generate a rule definition as a JSON object with these fields:
+- id: kebab-case identifier (e.g., "max-entry-lines")
+- issue_code: uppercase with prefix (e.g., "JE-MAX-LINES")
+- description: plain-language description of what the rule checks
+- check_type: one of the available check types above
+- severity: "error" or "warning"
+- scope: "file", "entry", or "line"
+- enabled: true
+- phase: "structural", "line", or "group"
+- params: parameters matching the check_type's schema
+
+Respond with a brief explanation of what the rule does, then the JSON in a ```json code block. Nothing else."""
+
+
+def _extract_json(text: str) -> dict | None:
+    """Extract a JSON object from AI response text."""
+    import re
+    # Try ```json block first
+    match = re.search(r"```json\s*\n(.*?)```", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+    # Try bare JSON object
+    match = re.search(r"\{[^{}]*\}", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
+    return None

@@ -168,6 +168,13 @@ export async function getCheckTypes() {
   return request<any>("/rules/check-types");
 }
 
+export async function generateRule(contract: string, description: string) {
+  return request<any>("/rules/generate", {
+    method: "POST",
+    body: JSON.stringify({ contract, description }),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Legacy preview API
 // ---------------------------------------------------------------------------
