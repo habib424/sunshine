@@ -12,12 +12,17 @@ interface TransformChatProps {
   initialMessage: string;
   initialHasScript: boolean;
   uploadedName: string;
+  intent?: string;
   onExecuted: (jobId: string) => void;
 }
 
 export default function TransformChat({
-  sessionId, initialMessage, initialHasScript, uploadedName, onExecuted,
+  sessionId, initialMessage, initialHasScript, uploadedName, intent, onExecuted,
 }: TransformChatProps) {
+  const isReconcile = intent === "reconcile_je_to_gl";
+  const isDeferral = intent === "migrate_deferred_cost_to_light_je" || intent === "migrate_deferred_revenue_to_light_je";
+  const isOpenAp = intent === "upload_open_ap_to_light_ap";
+  const isFx = intent === "fx_currency_adjustment";
   const [messages, setMessages] = useState<Message[]>([
     { role: "assistant", content: initialMessage, has_script: initialHasScript },
   ]);
@@ -62,7 +67,16 @@ export default function TransformChat({
   const handleExecute = async () => {
     setIsExecuting(true);
     try {
-      const outputName = uploadedName.replace(/\.[^.]+$/, "") + "_Light_Upload.xlsx";
+      const suffix = isReconcile
+        ? "_Reconciliation.xlsx"
+        : isDeferral
+        ? "_Light_JE_Upload.xlsx"
+        : isOpenAp
+        ? "_Light_AP_Upload.xlsx"
+        : isFx
+        ? "_FX_Adjustment.xlsx"
+        : "_Light_Upload.xlsx";
+      const outputName = uploadedName.replace(/\.[^.]+$/, "") + suffix;
       const result = await executeChat(sessionId, outputName);
       setExecutionResult(result);
       if (result.success) {
@@ -96,14 +110,14 @@ export default function TransformChat({
               {msg.has_script && msg.role === "assistant" && (
                 <div className="mt-3 pt-3 border-t border-gray-100">
                   <div className="flex items-center gap-2">
-                    <span className="text-xs text-green-600 font-medium">&#9889; Script ready</span>
+                    <span className="text-xs text-green-600 font-medium">{isDeferral || isOpenAp || isFx ? "Deterministic plan ready" : "Script ready"}</span>
                     {!executionResult && (
                       <button
                         onClick={handleExecute}
                         disabled={isExecuting}
                         className="px-3 py-1 bg-sunshine-500 text-white text-xs rounded-lg hover:bg-sunshine-600 disabled:opacity-50 font-medium"
                       >
-                        {isExecuting ? "Running..." : "Run Migration"}
+                        {isExecuting ? "Running..." : isReconcile ? "Run Reconciliation" : isOpenAp ? "Run AP Migration" : isFx ? "Run FX Adjustment" : "Run Migration"}
                       </button>
                     )}
                   </div>
@@ -133,7 +147,7 @@ export default function TransformChat({
             {executionResult.success ? (
               <div>
                 <p className="text-green-700 font-medium text-sm">
-                  &#9989; Migration complete — {executionResult.rows} rows generated
+                  &#9989; {isReconcile ? "Reconciliation" : isOpenAp ? "AP upload" : isFx ? "FX adjustment" : "Migration"} complete — {executionResult.rows} rows generated
                 </p>
                 {executionResult.preview && (
                   <div className="mt-3 overflow-x-auto">
@@ -197,11 +211,27 @@ export default function TransformChat({
           </button>
         </div>
         <div className="flex gap-2 mt-2">
-          {[
+          {(isReconcile ? [
+            "Show debit/credit breakdown",
+            "Exclude zero-balance accounts",
+            "Looks good, run it",
+          ] : isDeferral ? [
+            "currency is EUR",
+            "posting date 2026-03-01",
+            "release template is 12 Months - Deferred Revenue",
+          ] : isOpenAp ? [
+            "entity is causaLens",
+            "currency is GBP",
+            "do not split vendor code",
+          ] : isFx ? [
+            "clearing account is 900300",
+            "posting date 31-07-2026",
+            "document year is 2025",
+          ] : [
             "Remove zero-balance lines",
             "Change date to 2024-12-31",
             "Looks good, run it",
-          ].map(suggestion => (
+          ]).map(suggestion => (
             <button
               key={suggestion}
               onClick={() => { setInput(suggestion); }}

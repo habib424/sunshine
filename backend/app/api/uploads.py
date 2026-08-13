@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from app.models.upload import UploadedFile
 from app.schemas.upload import FilePreview, UploadResponse
-from app.services.file_service import read_file_metadata, read_file_preview, save_upload
+from app.services.file_service import delete_upload_files, read_file_metadata, read_file_preview, save_upload
 
 router = APIRouter(prefix="/api/uploads", tags=["uploads"])
 
@@ -112,9 +112,7 @@ async def delete_upload(upload_id: str, db: AsyncSession = Depends(get_db)):
     if not upload:
         raise HTTPException(status_code=404, detail="Upload not found")
 
-    file_path = Path(upload.storage_path)
-    if file_path.exists():
-        file_path.unlink()
+    delete_upload_files(Path(upload.storage_path))
 
     await db.delete(upload)
     await db.commit()

@@ -29,10 +29,12 @@ detection_rules:
     indicators:
       column_signatures:
         - ["Supplier", "Invoice number", "Due date", "Amount", "Currency"]
+        - ["Fortnox invoice nr", "Leverantor", "Faktdat", "Forfdat", "Valuta", "Saldo i SEK"]
         - ["Leverandør", "Fakturanummer", "Forfaldsdato", "Beløb"]
       filename_patterns:
         - "open_ap*"
         - "ap_*"
+        - "ap*"
         - "leverandør*"
 
   - file_type: open_ar

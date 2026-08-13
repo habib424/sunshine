@@ -1,5 +1,7 @@
 from enum import Enum
 from pathlib import Path
+import re
+import unicodedata
 
 import pandas as pd
 
@@ -87,15 +89,25 @@ def run_transform(df: pd.DataFrame, file_type_config: dict) -> pd.DataFrame:
 
     for mapping in mappings:
         source_col = mapping.get("source")
+        source_cols = mapping.get("sources")
         target_col = mapping["target"]
         transform_name = mapping.get("transform", "passthrough")
         params = mapping.get("params", {})
 
-        if source_col is None:
+        if source_cols:
+            source_series = None
+            for candidate in source_cols:
+                matched_col = _find_source_column(df, candidate)
+                if matched_col is not None:
+                    source_series = df[matched_col].copy()
+                    break
+            if source_series is None:
+                source_series = pd.Series([""] * len(df), index=df.index)
+        elif source_col is None:
             # Computed/static column - pass an empty series
             source_series = pd.Series([""] * len(df), index=df.index)
-        elif source_col in df.columns:
-            source_series = df[source_col].copy()
+        elif (matched_col := _find_source_column(df, source_col)) is not None:
+            source_series = df[matched_col].copy()
         else:
             # Source column not found - create empty
             source_series = pd.Series([""] * len(df), index=df.index)
@@ -112,7 +124,42 @@ def run_transform(df: pd.DataFrame, file_type_config: dict) -> pd.DataFrame:
             func = get_transform(transform_name)
             result[target_col] = func(source_series, params)
 
+    result = _apply_post_filters(result, file_type_config)
     return result
+
+
+def _apply_post_filters(df: pd.DataFrame, file_type_config: dict) -> pd.DataFrame:
+    drop_missing_all = file_type_config.get("drop_rows_missing_all", [])
+    if not drop_missing_all:
+        return df
+
+    existing = [col for col in drop_missing_all if col in df.columns]
+    if not existing:
+        return df
+
+    missing = df[existing].isna() | (df[existing].astype(str).apply(lambda s: s.str.strip() == ""))
+    return df[~missing.all(axis=1)].reset_index(drop=True)
+
+
+_NON_ALNUM = re.compile(r"[^a-z0-9]+")
+
+
+def _normalize_column_name(value) -> str:
+    text = unicodedata.normalize("NFKD", str(value))
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return _NON_ALNUM.sub(" ", text.lower()).strip()
+
+
+def _find_source_column(df: pd.DataFrame, candidate) -> str | None:
+    if candidate is None:
+        return None
+    if candidate in df.columns:
+        return candidate
+    wanted = _normalize_column_name(candidate)
+    for col in df.columns:
+        if _normalize_column_name(col) == wanted:
+            return col
+    return None
 
 
 def run_validate(df: pd.DataFrame, file_type_config: dict) -> list[dict]:

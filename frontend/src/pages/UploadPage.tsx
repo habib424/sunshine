@@ -4,7 +4,7 @@ import IntentAnalysis from "../components/upload/IntentAnalysis";
 import TransformChat from "../components/chat/TransformChat";
 import { uploadFiles, startChat, getExportUrl, getIntents } from "../api/client";
 import { useAppStore } from "../stores/appStore";
-import { Target, FileSearch, GitCompare, Loader2 } from "lucide-react";
+import { Target, FileSearch, GitCompare, Loader2, CalendarClock, ReceiptText, ArrowLeftRight } from "lucide-react";
 
 type Step = "upload" | "intent" | "starting" | "analyze" | "chat" | "done";
 
@@ -12,6 +12,10 @@ const INTENT_ICONS: Record<string, typeof Target> = {
   convert_to_light_je: Target,
   validate_je: FileSearch,
   reconcile_je_to_gl: GitCompare,
+  migrate_deferred_cost_to_light_je: CalendarClock,
+  migrate_deferred_revenue_to_light_je: ReceiptText,
+  upload_open_ap_to_light_ap: ReceiptText,
+  fx_currency_adjustment: ArrowLeftRight,
 };
 
 export default function UploadPage() {
@@ -134,7 +138,7 @@ export default function UploadPage() {
     <div className={step === "chat" ? "max-w-4xl" : "max-w-3xl"}>
       <div className="flex items-center justify-between mb-2">
         <h1 className="text-2xl font-bold text-gray-900">
-          {step === "intent" ? "What do you need?" : step === "analyze" ? "Validation Report" : step === "chat" ? "Configure Migration" : "Upload & Migrate"}
+          {step === "intent" ? "What do you need?" : step === "analyze" ? "Validation Report" : step === "chat" ? (selectedIntent === "reconcile_je_to_gl" ? "Reconciliation" : "Configure Migration") : "Upload & Migrate"}
         </h1>
         {(step === "chat" || step === "intent" || step === "analyze") && (
           <button onClick={handleReset} className="px-3 py-1.5 text-xs text-gray-500 border border-gray-300 rounded-lg hover:bg-gray-50">
@@ -235,6 +239,7 @@ export default function UploadPage() {
           initialMessage={initialMessage}
           initialHasScript={initialHasScript}
           uploadedName={uploadedName}
+          intent={selectedIntent || undefined}
           onExecuted={handleExecuted}
         />
       )}
@@ -242,8 +247,10 @@ export default function UploadPage() {
       {step === "done" && jobId && (
         <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
           <div className="text-4xl mb-3">&#9989;</div>
-          <h2 className="text-lg font-semibold text-gray-900 mb-1">Migration complete</h2>
-          <p className="text-gray-500 text-sm mb-6">Your file has been transformed and is ready to download.</p>
+          <h2 className="text-lg font-semibold text-gray-900 mb-1">
+            {selectedIntent === "reconcile_je_to_gl" ? "Reconciliation complete" : "Migration complete"}
+          </h2>
+          <p className="text-gray-500 text-sm mb-6">Your file is ready to download.</p>
           <div className="flex gap-3 justify-center">
             <a href={getExportUrl(jobId)} download
               className="px-6 py-2.5 bg-sunshine-500 text-white rounded-lg hover:bg-sunshine-600 font-medium text-sm transition-colors">

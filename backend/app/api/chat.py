@@ -9,6 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.chat_transformer import chat, create_session, execute_script, get_session
 from app.config import settings
 from app.db.session import get_db
+from app.engine.deferrals import DEFERRAL_INTENTS
+from app.engine.fx_adjustment import FX_ADJUSTMENT_INTENTS
+from app.engine.open_ap import OPEN_AP_INTENTS
 from app.models.job import TransformationJob
 from app.models.upload import UploadedFile
 
@@ -34,7 +37,7 @@ async def start_chat(upload_id: str, body: dict = None, db: AsyncSession = Depen
     layout_context = _build_layout_context(file_path, intent)
 
     try:
-        result = create_session(file_path, goal=goal)
+        result = create_session(file_path, goal=goal, intent=intent)
 
         # Build a grounded initial message whose task matches the intent.
         initial_msg = f"I've uploaded '{upload.original_name}'.\n\n"
@@ -61,6 +64,14 @@ async def start_chat(upload_id: str, body: dict = None, db: AsyncSession = Depen
 
 def _build_layout_context(file_path: Path, intent: str) -> str:
     """Run the deterministic layout detector and format findings for the AI."""
+    if (
+        intent == "reconcile_je_to_gl"
+        or intent in DEFERRAL_INTENTS
+        or intent in OPEN_AP_INTENTS
+        or intent in FX_ADJUSTMENT_INTENTS
+    ):
+        return ""  # These paths use their own multi-sheet analysis.
+
     try:
         from app.engine.ingest.orchestrator import ingest
         result = ingest(file_path, intent)
@@ -111,9 +122,46 @@ def _intent_instruction(intent: str) -> str:
         )
     elif intent == "reconcile_je_to_gl":
         return (
-            "My intent is to RECONCILE this journal entry file against a GL extract.\n\n"
-            "Analyze the file structure and tell me what you can match and what's unmatched. "
-            "Do NOT propose a transformation plan."
+            "My intent is to RECONCILE journal entries against a trial balance or GL extract.\n\n"
+            "This workbook contains two datasets:\n"
+            "1. A sheet with journal entry line items (debits and credits per account)\n"
+            "2. A sheet with trial balance or GL summary balances per account\n\n"
+            "Please:\n"
+            "1. Identify which sheet is the JE data and which is the TB/GL data\n"
+            "2. Identify how account codes appear in each sheet "
+            "(column name, embedded in descriptions, etc.)\n"
+            "3. Propose a reconciliation plan that:\n"
+            "   - Aggregates JE data to net balance per account code\n"
+            "   - Extracts account code and balance from the TB/GL sheet\n"
+            "   - Joins on account code and computes differences\n"
+            "   - Flags each account as Matched, Difference, JE Only, or TB Only\n"
+            "4. Show me the plan before generating any script\n\n"
+            "The output should be a reconciliation report DataFrame."
+        )
+    elif intent in DEFERRAL_INTENTS:
+        direction = "deferred revenue" if "revenue" in intent else "deferred cost / prepayment"
+        return (
+            f"My intent is to MIGRATE {direction} balances into the Light JE upload format.\n\n"
+            "Use the target Light JE layout as the destination, identify the source schedule and any reference extracts, "
+            "ask only for missing facts, and execute using deterministic rules once the required facts are available."
+        )
+    elif intent in OPEN_AP_INTENTS:
+        return (
+            "My intent is to UPLOAD open accounts payable into Light.\n\n"
+            "Identify the AP source (flat ledger or aging detail report), exclude section "
+            "headers, per-vendor subtotals and grand totals, net vendor payments against "
+            "outstanding invoices, reuse Light Posting reference lines when the workbook "
+            "carries them, ask only for missing facts, and execute using deterministic "
+            "rules once the required facts are available."
+        )
+    elif intent in FX_ADJUSTMENT_INTENTS:
+        return (
+            "My intent is to post FX CURRENCY ADJUSTMENTS so the booked account-currency "
+            "amounts align with the real bank balances.\n\n"
+            "Compare the booked balances from the trial balance with the real bank balances, "
+            "post each difference against the bank clearing account with Local and Group "
+            "Currency FX Rate overridden to 0, ask only for missing facts, and execute using "
+            "deterministic rules once the required facts are available."
         )
     else:
         # Default: convert_to_light_je

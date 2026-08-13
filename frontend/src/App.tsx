@@ -6,6 +6,7 @@ import TransformPage from "./pages/TransformPage";
 import ValidationPage from "./pages/ValidationPage";
 import ExportPage from "./pages/ExportPage";
 import PlaybooksPage from "./pages/PlaybooksPage";
+import ReconciliationPage from "./pages/ReconciliationPage";
 
 export default function App() {
   return (
@@ -15,6 +16,7 @@ export default function App() {
         <Route path="/upload" element={<UploadPage />} />
         <Route path="/transform" element={<TransformPage />} />
         <Route path="/validation" element={<ValidationPage />} />
+        <Route path="/reconciliation" element={<ReconciliationPage />} />
         <Route path="/export" element={<ExportPage />} />
         <Route path="/playbooks" element={<PlaybooksPage />} />
       </Route>

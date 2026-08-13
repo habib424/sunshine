@@ -86,8 +86,9 @@ async def generate_rule_endpoint(body: GenerateRequest):
         from app.ai.client import get_client
         client = get_client()
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-5",
             max_tokens=1024,
+            thinking={"type": "disabled"},
             messages=[{"role": "user", "content": prompt}],
         )
         text = response.content[0].text

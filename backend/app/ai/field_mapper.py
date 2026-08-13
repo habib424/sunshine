@@ -21,8 +21,9 @@ def suggest_mappings_ai(source_columns: list[str], target_columns: list[str]) ->
     )
 
     message = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-5",
         max_tokens=512,
+        thinking={"type": "disabled"},
         messages=[{"role": "user", "content": prompt}],
     )
 

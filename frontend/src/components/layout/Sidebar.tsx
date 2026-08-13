@@ -6,6 +6,7 @@ import {
   CheckCircle,
   Download,
   BookOpen,
+  GitCompare,
 } from "lucide-react";
 
 const navItems = [
@@ -13,6 +14,7 @@ const navItems = [
   { to: "/upload", icon: Upload, label: "Upload" },
   { to: "/transform", icon: Play, label: "Transform" },
   { to: "/validation", icon: CheckCircle, label: "Validation" },
+  { to: "/reconciliation", icon: GitCompare, label: "Reconcile" },
   { to: "/export", icon: Download, label: "Export" },
   { to: "/playbooks", icon: BookOpen, label: "Playbooks" },
 ];

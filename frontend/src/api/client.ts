@@ -72,6 +72,35 @@ export function getExportUrl(jobId: string) {
   return `${BASE_URL}/jobs/${jobId}/export`;
 }
 
+export async function runReconciliation(
+  journalUploadId: string,
+  trialBalanceUploadIds: string[],
+  tolerance = 0.01
+) {
+  return request<any>("/reconciliation/run", {
+    method: "POST",
+    body: JSON.stringify({
+      journal_upload_id: journalUploadId,
+      tb_upload_ids: trialBalanceUploadIds,
+      tolerance,
+    }),
+  });
+}
+
+export async function identifyReconciliationFiles(uploadIds: string[]) {
+  return request<any>("/reconciliation/identify", {
+    method: "POST",
+    body: JSON.stringify({ upload_ids: uploadIds }),
+  });
+}
+
+export async function runAutoReconciliation(uploadIds: string[], tolerance = 0.01) {
+  return request<any>("/reconciliation/auto-run", {
+    method: "POST",
+    body: JSON.stringify({ upload_ids: uploadIds, tolerance }),
+  });
+}
+
 export async function analyzeUpload(uploadId: string) {
   return request<any>(`/analyze/${uploadId}`, { method: "POST" });
 }

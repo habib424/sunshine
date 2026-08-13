@@ -1,4 +1,6 @@
 from pathlib import Path
+import re
+import unicodedata
 
 import yaml
 
@@ -57,7 +59,7 @@ def get_playbook(name: str) -> PlaybookConfig:
 
 
 def detect_file_type(playbook: PlaybookConfig, column_headers: list[str], filename: str) -> tuple[str | None, float]:
-    headers_lower = [h.lower().strip() for h in column_headers]
+    headers_lower = [_normalize_indicator(h) for h in column_headers]
     filename_lower = filename.lower()
 
     best_match = None
@@ -69,7 +71,7 @@ def detect_file_type(playbook: PlaybookConfig, column_headers: list[str], filena
 
         # Check column signatures
         for signature in indicators.get("column_signatures", []):
-            sig_lower = [s.lower().strip() for s in signature]
+            sig_lower = [_normalize_indicator(s) for s in signature]
             matches = sum(1 for s in sig_lower if s in headers_lower)
             score = matches / len(sig_lower) if sig_lower else 0
             if score > best_score:
@@ -85,3 +87,12 @@ def detect_file_type(playbook: PlaybookConfig, column_headers: list[str], filena
                     best_match = file_type
 
     return (best_match, best_score) if best_score >= 0.5 else (None, 0.0)
+
+
+_NON_ALNUM = re.compile(r"[^a-z0-9]+")
+
+
+def _normalize_indicator(value: str) -> str:
+    text = unicodedata.normalize("NFKD", str(value))
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return _NON_ALNUM.sub(" ", text.lower()).strip()

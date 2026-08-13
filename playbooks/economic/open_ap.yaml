@@ -5,26 +5,52 @@ target_template: open_ap.xlsx
 source_sheet: 0
 header_row: 0
 
+drop_rows_missing_all:
+  - vendor_number
+  - invoice_number
+
 mappings:
-  - source: "Supplier"
+  - sources:
+      - "Supplier"
+      - "Supplier number"
+      - "Vendor"
+      - "Vendor number"
+      - "Leverantor"
     target: "vendor_number"
     transform: strip_whitespace
 
-  - source: "Invoice number"
+  - sources:
+      - "Invoice number"
+      - "Invoice nr"
+      - "Invoice no"
+      - "Fortnox invoice nr"
+      - "Fakturanr"
+      - "Fakturanummer"
     target: "invoice_number"
-    transform: strip_whitespace
+    transform: clean_identifier
 
-  - source: "Due date"
+  - sources:
+      - "Due date"
+      - "Forfdat"
+      - "Forfallodatum"
+      - "Forfallsdatum"
     target: "due_date"
     transform: normalize_date
     params:
       output_format: "%Y-%m-%d"
 
-  - source: "Amount"
+  - sources:
+      - "Saldo"
+      - "Amount"
+      - "Belopp"
+      - "Saldo i SEK"
+      - "Belopp i SEK"
     target: "amount"
     transform: parse_currency
 
-  - source: "Currency"
+  - sources:
+      - "Currency"
+      - "Valuta"
     target: "currency"
     transform: uppercase
 

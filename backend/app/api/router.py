@@ -7,6 +7,7 @@ from app.api.rules import router as rules_router
 from app.api.jobs import router as jobs_router
 from app.api.playbooks import router as playbooks_router
 from app.api.preview import router as preview_router
+from app.api.reconciliation import router as reconciliation_router
 from app.api.uploads import router as uploads_router
 
 api_router = APIRouter()
@@ -18,3 +19,4 @@ api_router.include_router(chat_router)
 api_router.include_router(preview_router)
 api_router.include_router(ingest_router)
 api_router.include_router(rules_router)
+api_router.include_router(reconciliation_router)

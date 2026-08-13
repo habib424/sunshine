@@ -15,6 +15,19 @@ def strip_whitespace(series: pd.Series, params: dict) -> pd.Series:
     return series.astype(str).str.strip()
 
 
+@register_transform("clean_identifier")
+def clean_identifier(series: pd.Series, params: dict) -> pd.Series:
+    def clean(value) -> str:
+        if pd.isna(value):
+            return ""
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        text = str(value).strip()
+        return text[:-2] if text.endswith(".0") and text[:-2].isdigit() else text
+
+    return series.apply(clean)
+
+
 @register_transform("extract_pattern")
 def extract_pattern(series: pd.Series, params: dict) -> pd.Series:
     pattern = params.get("pattern", "(.*)")
@@ -51,6 +64,16 @@ def normalize_date(series: pd.Series, params: dict) -> pd.Series:
         dates = pd.to_datetime(series, format=input_format, errors="coerce")
     else:
         dates = pd.to_datetime(series, errors="coerce")
+        numeric = pd.to_numeric(series, errors="coerce")
+        excel_serial_mask = numeric.between(20000, 80000)
+        if excel_serial_mask.any():
+            excel_dates = pd.to_datetime(
+                numeric[excel_serial_mask],
+                unit="D",
+                origin="1899-12-30",
+                errors="coerce",
+            )
+            dates.loc[excel_serial_mask] = excel_dates
     return dates.dt.strftime(output_format).fillna("")
 
 

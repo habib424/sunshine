@@ -32,8 +32,9 @@ def detect_file_type_ai(headers: list[str], sample_rows: list[list], filename: s
     )
 
     message = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-5",
         max_tokens=256,
+        thinking={"type": "disabled"},
         messages=[{"role": "user", "content": prompt}],
     )
 

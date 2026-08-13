@@ -21,7 +21,9 @@
       "Bash(python -m pip install fastapi \"uvicorn[standard]\" \"sqlalchemy[asyncio]\" aiosqlite alembic pydantic-settings python-multipart openpyxl pandas pyyaml anthropic jinja2)",
       "Bash(python -c \"from app.main import app; print\\(''Backend imports OK''\\)\")",
       "Read(//c/Users/Habib/AppData/Roaming/Claude/local-agent-mode-sessions/skills-plugin/54f20edf-c9e4-48c5-9026-739965f80a90/40f07c7a-75b4-4c97-9b0b-d91459b20a76/skills/xlsx/**)",
-      "Bash(python -c \":*)"
+      "Bash(python -c \":*)",
+      "Skill(claude-api)",
+      "Skill(claude-api:*)"
     ]
   }
 }
