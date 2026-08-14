@@ -316,6 +316,55 @@ def test_single_customer_report_is_still_grouped(tmp_path):
     assert row["Currency"] == "GBP"
 
 
+def test_dual_currency_report_prices_lines_in_document_currency(tmp_path):
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "AR US"
+    ws.append(["causaLens"])
+    ws.append(["causaLens : causaLens US"])
+    ws.append(["A/R Aging Detail"])
+    ws.append(["As of 31 July 2026"])
+    ws.append([None])
+    ws.append([None])
+    ws.append(
+        ["Customer", "Transaction Type", "Date", "Document Number", "P.O. No.", "Due Date",
+         "Age", "Local currency open amount", "Currency", "Currency amount"]
+    )
+    ws.append(["C117 Syneos Health, LLC"])
+    ws.append([None, "Invoice", datetime(2026, 5, 12), "INV360", None, datetime(2026, 7, 11), 33, 375000.0, "USD", 375000.0])
+    ws.append([None, "Invoice", datetime(2026, 6, 1), "INV370", None, datetime(2026, 8, 1), 20, 91500.0, "EUR", 100000.0])
+    ws.append(["Total - C117 Syneos Health, LLC", None, None, None, None, None, None, 466500.0])
+    ws.append(["C124 Omnicom Advertising"])
+    ws.append([None, "Payment", datetime(2026, 7, 1), "PMT-2", None, None, None, -1000.0, "USD", -1000.0])
+    ws.append(["Total - C124 Omnicom Advertising", None, None, None, None, None, None, -1000.0])
+    ws.append(["Total", None, None, None, None, None, None, 465500.0])
+    path = tmp_path / "AR dual currency.xlsx"
+    wb.save(path)
+
+    analysis = analyze_invoices_ar_workbook(path)
+    assert analysis.roles["open_amount_local"] == "Local currency open amount"
+    assert analysis.roles["open_amount_txn"] == "Currency amount"
+    assert analysis.ready
+    assert analysis.source_total == pytest.approx(465500.0)
+    assert analysis.reported_total == pytest.approx(465500.0)
+
+    df = transform_open_ar_to_light_invoices(path, analysis)
+    assert len(df) == 3
+
+    eur = _row_by_invoice(df, "INV370")
+    assert eur["Currency"] == "EUR"
+    assert eur["Invoice Currency Amount"] == pytest.approx(100000.0)
+    assert eur["Local Currency Amount"] == pytest.approx(91500.0)
+    # The line is priced in the document's own currency, not the local books.
+    assert eur["Unit Price"] == pytest.approx(100000.0)
+
+    credit_note = _row_by_invoice(df, "PMT-2")
+    assert credit_note["Invoice Currency Amount"] == pytest.approx(-1000.0)
+    assert credit_note["Unit Price"] == pytest.approx(-1000.0)
+
+
 def test_entity_comes_from_colon_title_without_template(tmp_path):
     path = _ar_workbook(tmp_path / "AR no template.xlsx", with_template=False)
     analysis = analyze_invoices_ar_workbook(path)

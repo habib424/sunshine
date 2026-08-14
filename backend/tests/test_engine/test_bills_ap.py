@@ -189,6 +189,69 @@ def test_subtotals_and_grand_total_are_never_bills(tmp_path):
     assert analysis.reported_total == pytest.approx(1569.35)
 
 
+def test_dual_currency_report_fills_invoice_and_local_amounts(tmp_path):
+    # Multi-currency variant ("AP UK.xlsx"): a fused local-amount header, a
+    # per-row Currency column and a transaction-currency amount column.
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "AP"
+    ws.append(["causaLens"])
+    ws.append(["A/P Aging Detail"])
+    ws.append(["As of 31 July 2026"])
+    ws.append([None])
+    ws.append([None])
+    ws.append(
+        ["Vendor", "Transaction Type", "Date", "Document Number", "Due Date", "Age",
+         "Local  CURRENCYopen amount", "Currency", "Currency amount"]
+    )
+    ws.append(["Supplier"])
+    ws.append(["S002 Addison Lee"])
+    ws.append([None, "Bill", datetime(2026, 7, 31), "3428325", datetime(2026, 7, 31), 13, 319.01, "GBP", 319.01])
+    ws.append(["Total - S002 Addison Lee", None, None, None, None, None, 319.01, None, 319.01])
+    ws.append(["S140 Google Cloud Platform & APIs"])
+    ws.append([None, "Bill", datetime(2026, 7, 31), "5654023658", datetime(2026, 8, 30), -17, 18655.60, "USD", 25094.03])
+    ws.append([None, "Bill", datetime(2026, 7, 31), "5654196370", datetime(2026, 8, 30), -17, 15079.59, "USD", 20283.86])
+    ws.append(["Total - S140 Google Cloud Platform & APIs", None, None, None, None, None, 33735.19])
+    ws.append(["S174 Adobe UK"])
+    ws.append([None, "Bill Payment", datetime(2026, 4, 11), "2241", datetime(2026, 4, 11), 124, -28.64, "GBP", -28.64])
+    ws.append([None, "Bill Payment", datetime(2026, 5, 11), "2351", datetime(2026, 5, 11), 94, -28.64, "GBP", -28.64])
+    ws.append(["Total - S174 Adobe UK", None, None, None, None, None, -57.28, None, -57.28])
+    path = tmp_path / "AP UK.xlsx"
+    wb.save(path)
+
+    analysis = analyze_bills_ap_workbook(path)
+    assert analysis.roles["open_amount_local"] == "Local  CURRENCYopen amount"
+    assert analysis.roles["open_amount_txn"] == "Currency amount"
+    assert analysis.roles["currency"] == "Currency"
+    assert analysis.layout == "grouped"
+    # A per-row currency column answers the currency question by itself,
+    # even with mixed codes; and no vendor subtotal is a grand-total anchor.
+    assert analysis.ready
+    assert not any("currency" in q.lower() for q in analysis.questions)
+    assert analysis.reported_total is None
+    assert analysis.source_total == pytest.approx(33996.92)
+
+    df = transform_open_ap_to_light_bills(path, analysis)
+    assert len(df) == 5
+
+    usd = _row_by_invoice(df, "5654023658")
+    assert usd["Currency"] == "USD"
+    assert usd["Invoice Currency Amount"] == pytest.approx(25094.03)
+    assert usd["Local Currency Amount"] == pytest.approx(18655.60)
+
+    gbp = _row_by_invoice(df, "3428325")
+    assert gbp["Currency"] == "GBP"
+    assert gbp["Invoice Currency Amount"] == pytest.approx(319.01)
+    assert gbp["Local Currency Amount"] == pytest.approx(319.01)
+
+    credit_note = _row_by_invoice(df, "2241")
+    assert credit_note["Currency"] == "GBP"
+    assert credit_note["Invoice Currency Amount"] == pytest.approx(-28.64)
+    assert credit_note["Local Currency Amount"] == pytest.approx(-28.64)
+
+
 def test_amountless_subtotals_still_detect_grouped_layout(tmp_path):
     # Re-saved workbooks can lose formula caches, leaving "Total - ..." rows
     # with a label and no amount. Those are subtotals, not vendor headers.

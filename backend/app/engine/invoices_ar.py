@@ -161,8 +161,25 @@ _ROLE_KEYWORDS: dict[str, list[str]] = {
         "balance",
         "saldo",
     ],
-    "amount": [
+    # Multi-currency reports carry two amount columns: the entity's local
+    # books amount and the document's own transaction-currency amount.
+    "open_amount_local": [
+        "local currency open amount",
+        "local open amount",
+        "local currency amount",
+        "local amount",
+        "open balance local",
+        "local balance",
+    ],
+    "open_amount_txn": [
         "invoice currency amount",
+        "transaction currency amount",
+        "foreign currency amount",
+        "currency amount",
+        "foreign amount",
+        "amount in currency",
+    ],
+    "amount": [
         "amount",
         "belopp",
     ],
@@ -458,7 +475,7 @@ def _required_role_hits(roles: dict[str, str]) -> int:
             ("invoice_number",),
             ("customer_name",),
             ("invoice_date", "due_date"),
-            ("open_amount", "amount"),
+            ("open_amount", "open_amount_local", "open_amount_txn", "amount"),
         )
         if any(role in roles for role in group)
     )
@@ -537,6 +554,7 @@ def _detect_grouping(df: pd.DataFrame, header_row: int, roles: dict[str, str]) -
 
 def _match_role(header: str, claimed: set[str]) -> tuple[str, float] | None:
     candidates: list[tuple[int, str, float]] = []
+    squashed_header = header.replace(" ", "")
     for role, keywords in _ROLE_KEYWORDS.items():
         if role in claimed:
             continue
@@ -544,6 +562,10 @@ def _match_role(header: str, claimed: set[str]) -> tuple[str, float] | None:
             norm = _normalise(keyword)
             if header == norm:
                 candidates.append((len(norm), role, 1.0))
+            elif norm.replace(" ", "") == squashed_header:
+                # Fused headers like "Local  CURRENCYopen amount" squash to
+                # the same letters as the keyword.
+                candidates.append((len(norm), role, 0.95))
             elif _word_boundary_match(norm, header):
                 candidates.append((len(norm), role, 0.9))
     if not candidates:
@@ -567,7 +589,13 @@ class _Detail:
     issue_date: str | None
     due_date: str | None
     po_number: str
+    # Local-books open balance: the conservation basis, because the report's
+    # subtotals and grand total are stated in the entity's local currency.
     amount: float
+    # Transaction-currency amount and per-row currency, when the report
+    # carries them (multi-currency AR).
+    txn_amount: float | None = None
+    row_currency: str = ""
 
 
 def _read_detail_rows(
@@ -583,9 +611,15 @@ def _read_detail_rows(
         role: _column_index(df, header_row, header) for role, header in roles.items()
     }
     customer_idx = idx.get("customer_name")
-    amount_idx = idx.get("open_amount")
+    # Local open balance first: it is the conservation basis the report's own
+    # subtotals and grand total are stated in.
+    amount_idx = idx.get("open_amount_local")
+    if amount_idx is None:
+        amount_idx = idx.get("open_amount")
     if amount_idx is None:
         amount_idx = idx.get("amount")
+    txn_idx = idx.get("open_amount_txn")
+    currency_idx = idx.get("currency")
 
     grouped = analysis.layout == "grouped"
     split_code = analysis.facts.get("split_customer_code", True)
@@ -658,6 +692,19 @@ def _read_detail_rows(
             else ""
         )
 
+        txn_amount = (
+            _to_float(values[txn_idx])
+            if txn_idx is not None and txn_idx < len(values)
+            else None
+        )
+        row_currency = (
+            _clean_text(values[currency_idx]).upper()
+            if currency_idx is not None and currency_idx < len(values)
+            else ""
+        )
+        if not re.fullmatch(r"[A-Z]{3}", row_currency):
+            row_currency = ""
+
         customer_id, customer_name = _split_customer(customer_raw, split_code)
         details.append(
             _Detail(
@@ -670,6 +717,8 @@ def _read_detail_rows(
                 due_date=due_date,
                 po_number=po_number,
                 amount=round(float(amount), 2),
+                txn_amount=round(float(txn_amount), 2) if txn_amount is not None else None,
+                row_currency=row_currency,
             )
         )
 
@@ -906,20 +955,27 @@ def _output_row(detail: _Detail, analysis: InvoicesARAnalysis) -> dict[str, Any]
             "Invoice Number": invoice_number or None,
             "Invoice Date": detail.issue_date,
             "Due Date": detail.due_date or detail.issue_date,
-            "Currency": analysis.facts.get("currency"),
+            # Per-row currency wins over the single report-level fact.
+            "Currency": detail.row_currency or analysis.facts.get("currency"),
             "PO Number": (detail.po_number or None) if include_po else None,
             "Description": description,
             # The sign carries the document type: a positive amount is an
-            # invoice, a negative amount is a credit note.
-            "Invoice Currency Amount": detail.amount,
-            # The aging report carries a single currency, so the invoice
-            # currency is the entity's local currency and no rate applies.
+            # invoice, a negative amount is a credit note. When the report
+            # has a transaction-currency column, that amount goes to Invoice
+            # Currency Amount (and prices the line); the local open balance
+            # always goes to Local Currency Amount.
+            "Invoice Currency Amount": (
+                detail.txn_amount if detail.txn_amount is not None else detail.amount
+            ),
             "Local Currency Amount": detail.amount,
             # One line per item, matching the worked example: the open
-            # balance as a single unit-priced product line.
+            # balance as a single unit-priced product line, in the
+            # document's own currency.
             "Product": analysis.facts.get("product", prefix),
             "Quantity": 1,
-            "Unit Price": detail.amount,
+            "Unit Price": (
+                detail.txn_amount if detail.txn_amount is not None else detail.amount
+            ),
         }
     )
     return row
@@ -938,11 +994,15 @@ def _missing_items(analysis: InvoicesARAnalysis) -> list[str]:
         missing.append("invoice_number")
     if "customer_name" not in analysis.roles:
         missing.append("customer_name")
-    if not any(r in analysis.roles for r in ("open_amount", "amount")):
+    if not any(
+        r in analysis.roles
+        for r in ("open_amount", "open_amount_local", "open_amount_txn", "amount")
+    ):
         missing.append("amount")
     if not analysis.facts.get("entity"):
         missing.append("entity")
-    if not analysis.facts.get("currency"):
+    # A per-row currency column answers the currency question by itself.
+    if not analysis.facts.get("currency") and "currency" not in analysis.roles:
         missing.append("currency")
     if analysis.source_sheet and analysis.invoice_rows + analysis.credit_note_rows == 0:
         missing.append("open_items")
@@ -963,13 +1023,30 @@ def _infer_assumptions(analysis: InvoicesARAnalysis) -> list[str]:
         "A positive amount is an invoice; a negative amount is a credit note in the same "
         "format. Payments, credit memos and zero-balance customers are never netted or "
         "dropped, so the upload ties to the report total.",
-        f"Entity `{facts.get('entity', '?')}` and currency `{facts.get('currency', '?')}` "
-        "apply to every row; the report has no per-row entity or currency.",
-        "Invoice currency amount equals local currency amount, so no FX rate is applied.",
         f"Each row gets Invoice Status `Open` and one line: Product "
         f"`{facts.get('product', _DEFAULT_DESCRIPTION_PREFIX)}`, Quantity 1, Unit Price equal "
         "to the open balance — matching the worked example.",
     ]
+    if "open_amount_txn" in analysis.roles:
+        local_header = (
+            analysis.roles.get("open_amount_local")
+            or analysis.roles.get("open_amount")
+            or analysis.roles.get("amount")
+        )
+        assumptions.append(
+            f"Entity `{facts.get('entity', '?')}` applies to every row; each row keeps its "
+            f"own currency from `{analysis.roles.get('currency', '?')}`, with Invoice "
+            f"Currency Amount and Unit Price from `{analysis.roles['open_amount_txn']}` and "
+            f"Local Currency Amount from `{local_header}`."
+        )
+    else:
+        assumptions.append(
+            f"Entity `{facts.get('entity', '?')}` and currency `{facts.get('currency', '?')}` "
+            "apply to every row; the report has no per-row entity or currency."
+        )
+        assumptions.append(
+            "Invoice currency amount equals local currency amount, so no FX rate is applied."
+        )
     if facts.get("split_customer_code", True) and analysis.split_example:
         example = analysis.split_example
         assumptions.append(
