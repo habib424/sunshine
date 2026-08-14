@@ -282,6 +282,34 @@ def apply_user_message_to_analysis(
     return refreshed
 
 
+def apply_structured_updates_to_analysis(
+    analysis: OpenAPAnalysis,
+    updates: dict[str, str],
+    file_path: Path,
+) -> OpenAPAnalysis:
+    """Apply an already validated AI patch without reparsing natural language."""
+    allowed = {
+        "entity",
+        "ledger",
+        "local_currency",
+        "posting_date",
+        "ap_account",
+        "clearing_account",
+    }
+    unknown = set(updates) - allowed
+    if unknown:
+        raise ValueError(f"Unsupported open AP updates: {sorted(unknown)}")
+
+    facts = dict(analysis.facts)
+    facts.update(updates)
+    refreshed = analyze_open_ap_workbook(file_path)
+    refreshed.facts.update({key: value for key, value in facts.items() if value not in (None, "")})
+    refreshed.assumptions = _infer_assumptions(refreshed)
+    refreshed.questions = _missing_questions(refreshed)
+    refreshed.warnings = _infer_warnings(file_path, refreshed)
+    return refreshed
+
+
 def transform_open_ap_to_light_ap(file_path: Path, analysis: OpenAPAnalysis) -> pd.DataFrame:
     missing = _missing_items(analysis)
     if missing:

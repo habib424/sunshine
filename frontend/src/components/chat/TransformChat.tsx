@@ -19,9 +19,13 @@ interface TransformChatProps {
 export default function TransformChat({
   sessionId, initialMessage, initialHasScript, uploadedName, intent, onExecuted,
 }: TransformChatProps) {
+  const isValidation = intent === "validate_je";
   const isReconcile = intent === "reconcile_je_to_gl";
-  const isDeferral = intent === "migrate_deferred_cost_to_light_je" || intent === "migrate_deferred_revenue_to_light_je";
+  const isDeferral = intent === "migrate_deferrals_to_light_je"
+    || intent === "migrate_deferred_cost_to_light_je"
+    || intent === "migrate_deferred_revenue_to_light_je";
   const isOpenAp = intent === "upload_open_ap_to_light_ap";
+  const isOpenAr = intent === "upload_open_ar_to_light_ar";
   const isFx = intent === "fx_currency_adjustment";
   const [messages, setMessages] = useState<Message[]>([
     { role: "assistant", content: initialMessage, has_script: initialHasScript },
@@ -53,7 +57,7 @@ export default function TransformChat({
         content: result.message,
         has_script: result.has_script,
       }]);
-      if (result.has_script) setHasScript(true);
+      setHasScript(Boolean(result.has_script));
     } catch (e: any) {
       setMessages(prev => [...prev, {
         role: "assistant",
@@ -73,6 +77,8 @@ export default function TransformChat({
         ? "_Light_JE_Upload.xlsx"
         : isOpenAp
         ? "_Light_AP_Upload.xlsx"
+        : isOpenAr
+        ? "_Light_AR_Upload.xlsx"
         : isFx
         ? "_FX_Adjustment.xlsx"
         : "_Light_Upload.xlsx";
@@ -110,14 +116,14 @@ export default function TransformChat({
               {msg.has_script && msg.role === "assistant" && (
                 <div className="mt-3 pt-3 border-t border-gray-100">
                   <div className="flex items-center gap-2">
-                    <span className="text-xs text-green-600 font-medium">{isDeferral || isOpenAp || isFx ? "Deterministic plan ready" : "Script ready"}</span>
+                    <span className="text-xs text-green-600 font-medium">{isDeferral || isOpenAp || isOpenAr || isFx ? "Deterministic plan ready" : "Script ready"}</span>
                     {!executionResult && (
                       <button
                         onClick={handleExecute}
                         disabled={isExecuting}
                         className="px-3 py-1 bg-sunshine-500 text-white text-xs rounded-lg hover:bg-sunshine-600 disabled:opacity-50 font-medium"
                       >
-                        {isExecuting ? "Running..." : isReconcile ? "Run Reconciliation" : isOpenAp ? "Run AP Migration" : isFx ? "Run FX Adjustment" : "Run Migration"}
+                        {isExecuting ? "Running..." : isReconcile ? "Run Reconciliation" : isOpenAp ? "Run AP Migration" : isOpenAr ? "Run AR Migration" : isFx ? "Run FX Adjustment" : "Run Migration"}
                       </button>
                     )}
                   </div>
@@ -147,7 +153,7 @@ export default function TransformChat({
             {executionResult.success ? (
               <div>
                 <p className="text-green-700 font-medium text-sm">
-                  &#9989; {isReconcile ? "Reconciliation" : isOpenAp ? "AP upload" : isFx ? "FX adjustment" : "Migration"} complete — {executionResult.rows} rows generated
+                  &#9989; {isReconcile ? "Reconciliation" : isOpenAp ? "AP upload" : isOpenAr ? "AR upload" : isFx ? "FX adjustment" : "Migration"} complete — {executionResult.rows} rows generated
                 </p>
                 {executionResult.preview && (
                   <div className="mt-3 overflow-x-auto">
@@ -197,7 +203,7 @@ export default function TransformChat({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={hasScript ? "Adjust the plan, or click Run Migration..." : "Tell Sunshine what to adjust..."}
+            placeholder={isValidation ? "Ask Sunshine about the validation findings..." : hasScript ? "Adjust the plan, or click Run Migration..." : isDeferral ? "Answer naturally - no special format needed..." : "Tell Sunshine what to adjust..."}
             className="flex-1 px-4 py-2.5 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-sunshine-300 focus:border-sunshine-400 resize-none min-h-[42px] max-h-[160px]"
             rows={Math.min(input.split("\n").length, 6) || 1}
             disabled={isLoading}
@@ -211,18 +217,18 @@ export default function TransformChat({
           </button>
         </div>
         <div className="flex gap-2 mt-2">
-          {(isReconcile ? [
+          {(isValidation ? [] : isReconcile ? [
             "Show debit/credit breakdown",
             "Exclude zero-balance accounts",
             "Looks good, run it",
-          ] : isDeferral ? [
-            "currency is EUR",
-            "posting date 2026-03-01",
-            "release template is 12 Months - Deferred Revenue",
-          ] : isOpenAp ? [
+          ] : isDeferral ? [] : isOpenAp ? [
             "entity is causaLens",
             "currency is GBP",
             "do not split vendor code",
+          ] : isOpenAr ? [
+            "entity is causaLens US",
+            "currency is USD",
+            "do not split customer code",
           ] : isFx ? [
             "clearing account is 900300",
             "posting date 31-07-2026",

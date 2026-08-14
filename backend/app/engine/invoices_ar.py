@@ -1,47 +1,42 @@
 """
-Deterministic open AP upload to the Light "Bills (AP)" bill-document layout.
+Deterministic open AR upload to the Light "Invoices (AR)" invoice layout.
 
-Unlike `open_ap.py`, which posts AP opening balances as debit/credit journal
-lines, this engine produces actual bill documents: one row per outstanding
-vendor invoice in Light's Bills (AP) upload template.
+The mirror image of `bills_ap.py`: instead of vendor bills, this engine
+produces open customer invoices — one row per outstanding AR invoice in
+Light's Invoices (AR) upload template.
 
-The sources seen so far are QuickBooks/Xero-style "A/P Aging Detail" reports,
+The sources seen so far are QuickBooks/Xero-style "A/R Aging Detail" reports,
 which are *hierarchical* rather than tabular:
 
-    causaLens                                      <- entity, title block
-    A/P Aging Detail
+    causaLens                                      <- title block
+    causaLens : causaLens US                       <- QB "company : entity"
+    A/R Aging Detail
     As of 31 July 2026
 
-    Vendor | Transaction Type | Date | Document Number | Due Date | Age | Open Balance
-    Supplier                                       <- section header
-    S002 Addison Lee                               <- vendor group header
-          | Bill | 2026-07-31 | 3428325 | ... | 319.01     <- detail row, Vendor blank
-    Total - S002 Addison Lee |                     | 319.01  <- subtotal
+    Customer | Transaction Type | Date | Document Number | P.O. No. | Due Date | Age | Open Balance
+    C117 Syneos Health, LLC                        <- customer group header
+          | Invoice | 2026-05-12 | INV360 | PO_... | ... | 375000.00   <- detail row, Customer blank
+    Total - C117 Syneos Health, LLC |      | 750000.00   <- subtotal
     ...
-    Total - Supplier | 53178.08
-    Total            | 53178.08                    <- grand total (conservation anchor)
+    Total                           |      | 913650.00   <- grand total (conservation anchor)
 
-Three things follow from that shape and drive this module:
+The same three traps as the AP aging report apply: the customer lives on a
+group-header row, subtotals and grand totals must be excluded or the migration
+double-counts (the grand total is kept as a reconciliation anchor), and
+`Payment` / `Credit Memo` rows carry negative balances. Every open item keeps
+its sign: a positive open balance becomes an invoice, a negative one becomes a
+credit note in the same format. Nothing is netted, dropped, or held back, so
+the output ties exactly to the report's own grand total.
 
-1. The vendor lives on a group header row, so detail rows have an empty vendor
-   cell. A flat reader that requires vendor-per-row drops every row.
-2. Section headers, per-vendor subtotals and grand totals must be excluded or
-   the migration double-counts. The grand total is kept as a reconciliation
-   anchor instead.
-3. `Bill Payment` and credit rows carry negative open balances. Every open
-   item keeps its sign: a positive open balance becomes an invoice (bill), a
-   negative one becomes a credit note in the same format. Nothing is netted,
-   dropped, or held back, so the output ties exactly to the report's own
-   grand total.
-
-When the workbook also contains a filled-in Bills (AP) template sheet, it is
-treated as a worked example and read for facts (entity, currency, description
-wording) rather than mistaken for the source data.
+When the workbook also contains a filled-in Invoices (AR) template sheet, it
+is treated as a worked example and read for facts (entity, currency,
+description wording, product) rather than mistaken for the source data. Each
+output invoice carries one line — Product, Quantity 1, Unit Price equal to the
+open balance — matching the worked example.
 """
 
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,6 +44,19 @@ from typing import Any
 
 import pandas as pd
 
+from app.engine.bills_ap import (
+    _DATE_IN_TEXT_RE,
+    _TOTAL_RE,
+    _VENDOR_CODE_RE as _CUSTOMER_CODE_RE,
+    _ZERO_TOL,
+    _column_index,
+    _count_data_rows,
+    _description_prefix,
+    _fmt_amount,
+    _grand_total,
+    _is_blank,
+    _looks_numeric,
+)
 from app.engine.open_ap import (
     _clean_reference,
     _clean_text,
@@ -59,33 +67,41 @@ from app.engine.open_ap import (
 )
 
 
-LIGHT_BILLS_AP_COLUMNS = [
-    "Vendor",
-    "Vendor ID",
+OPEN_AR_INTENT = "upload_open_ar_to_light_ar"
+OPEN_AR_INTENTS = {OPEN_AR_INTENT}
+
+
+LIGHT_INVOICES_AR_COLUMNS = [
     "Entity",
+    "Invoice Status",
+    "Customer",
+    "Customer ID",
     "Invoice Number",
-    "Issue Date",
+    "Invoice Date",
     "Due Date",
     "Currency",
-    "Pay From",
-    "Payment Date",
+    "Payment Type",
+    "Payment To",
+    "Invoice Template",
+    "Net Terms",
+    "PO Number",
     "Description",
-    "Lines With Tax",
+    "Gross/Net",
     "Invoice Currency Amount",
     "Local Currency Amount",
-    "Line Description",
-    "Line Amount",
+    "Product",
+    "Quantity",
+    "Unit Price",
+    "Product Name Override",
     "Tax Code",
     "Account",
-    "Line Tax Amount",
-    "Amortization Template",
-    "Amortization Start Date",
-    "Amortization End Date",
+    "Tax Amount Override",
+    "Billing Start",
+    "Billing End",
+    "Accrual Template",
+    "Accrual Start Date",
+    "Accrual End Date",
 ]
-
-# Amounts below this are treated as zero when netting and when deciding whether
-# a residual balance is worth migrating.
-_ZERO_TOL = 0.005
 
 _DEFAULT_DESCRIPTION_PREFIX = "Data migration"
 
@@ -97,19 +113,18 @@ _ROLE_KEYWORDS: dict[str, list[str]] = {
         "invoice number",
         "invoice nr",
         "invoice no",
-        "bill number",
-        "bill no",
         "reference",
         "fakturanummer",
         "fakturanr",
     ],
-    "vendor_name": [
-        "vendor",
-        "vendor name",
-        "supplier",
-        "supplier name",
-        "leverantor",
-        "payee",
+    "customer_name": [
+        "customer",
+        "customer name",
+        "client",
+        "client name",
+        "kund",
+        "kundnamn",
+        "debtor",
     ],
     "transaction_type": [
         "transaction type",
@@ -130,6 +145,13 @@ _ROLE_KEYWORDS: dict[str, list[str]] = {
         "faktdat",
         "fakturadatum",
         "date",
+    ],
+    "po_number": [
+        "p o no",
+        "po no",
+        "po number",
+        "purchase order",
+        "customer po",
     ],
     "open_amount": [
         "open balance",
@@ -156,22 +178,13 @@ _ROLE_KEYWORDS: dict[str, list[str]] = {
 
 # Report furniture that must never be read as an entity name.
 _TITLE_NOISE = re.compile(
-    r"aging|ageing|a\s*/?\s*p\b|accounts payable|as of|report|detail|summary|unpaid|open items",
+    r"aging|ageing|a\s*/?\s*r\b|accounts receivable|as of|report|detail|summary|unpaid|open items",
     re.IGNORECASE,
-)
-
-# "S002 Addison Lee" -> ("S002", "Addison Lee"). Deliberately strict: a letter
-# prefix of 1-3 chars followed by digits, or a pure digit code of 3+ digits.
-_VENDOR_CODE_RE = re.compile(r"^([A-Za-z]{1,3}\d{2,8}|\d{3,8})[\s\-:]+(.+)$")
-
-_TOTAL_RE = re.compile(r"^total\b", re.IGNORECASE)
-_DATE_IN_TEXT_RE = re.compile(
-    r"(\d{4})-(\d{1,2})-(\d{1,2})|(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})"
 )
 
 
 @dataclass
-class BillsAPAnalysis:
+class InvoicesARAnalysis:
     source_sheet: str | None = None
     header_row: int | None = None
     layout: str = "flat"  # "flat" | "grouped"
@@ -180,9 +193,9 @@ class BillsAPAnalysis:
     template_sheet: str | None = None
     facts: dict[str, Any] = field(default_factory=dict)
     # Open-item summary by sign, for the analysis message and audit trail.
-    credit_note_vendors: list[dict[str, Any]] = field(default_factory=list)
+    credit_note_customers: list[dict[str, Any]] = field(default_factory=list)
     split_example: dict[str, str] | None = None
-    missing_date_vendors: list[str] = field(default_factory=list)
+    missing_date_customers: list[str] = field(default_factory=list)
     source_total: float | None = None
     reported_total: float | None = None
     invoice_total: float | None = None
@@ -209,9 +222,9 @@ class BillsAPAnalysis:
             "role_confidence": self.role_confidence,
             "template_sheet": self.template_sheet,
             "facts": self.facts,
-            "credit_note_vendors": self.credit_note_vendors,
+            "credit_note_customers": self.credit_note_customers,
             "split_example": self.split_example,
-            "missing_date_vendors": self.missing_date_vendors,
+            "missing_date_customers": self.missing_date_customers,
             "source_total": self.source_total,
             "reported_total": self.reported_total,
             "invoice_total": self.invoice_total,
@@ -233,9 +246,9 @@ class BillsAPAnalysis:
 # --------------------------------------------------------------------------
 
 
-def analyze_bills_ap_workbook(file_path: Path) -> BillsAPAnalysis:
+def analyze_invoices_ar_workbook(file_path: Path) -> InvoicesARAnalysis:
     sheets = pd.read_excel(file_path, sheet_name=None, header=None, engine="openpyxl")
-    analysis = BillsAPAnalysis()
+    analysis = InvoicesARAnalysis()
 
     template = _find_template_sheet(sheets)
     if template:
@@ -243,7 +256,7 @@ def analyze_bills_ap_workbook(file_path: Path) -> BillsAPAnalysis:
 
     source = _find_source_sheet(sheets, analysis.template_sheet)
     if not source:
-        analysis.questions = ["Which sheet contains the open AP invoice detail?"]
+        analysis.questions = ["Which sheet contains the open AR invoice detail?"]
         return analysis
 
     analysis.source_sheet = source["sheet"]
@@ -259,56 +272,31 @@ def analyze_bills_ap_workbook(file_path: Path) -> BillsAPAnalysis:
     return analysis
 
 
-def apply_user_message_to_analysis(
-    analysis: BillsAPAnalysis,
-    message: str,
-    file_path: Path,
-) -> BillsAPAnalysis:
-    """Fold facts stated in chat ("entity is causaLens") into the analysis."""
-    overrides: dict[str, Any] = {}
-
-    entity = _parse_named_value(message, ("entity", "company"))
-    if entity:
-        overrides["entity"] = entity
-
-    currency = _parse_named_value(message, ("currency", "local currency"))
-    if currency and re.fullmatch(r"[A-Za-z]{3}", currency.strip()):
-        overrides["currency"] = currency.strip().upper()
-
-    description = _parse_named_value(message, ("description", "description prefix"))
-    if description:
-        overrides["description_prefix"] = description
-
-    if _mentions_disable_vendor_id(message):
-        overrides["split_vendor_code"] = False
-
-    refreshed = analyze_bills_ap_workbook(file_path)
-    refreshed.facts.update({k: v for k, v in overrides.items() if v not in (None, "")})
-    # The summary depends on facts only for labelling, but re-run so the
-    # analysis message and the transform always agree.
-    sheets = pd.read_excel(file_path, sheet_name=None, header=None, engine="openpyxl")
-    _summarize_open_items(sheets, refreshed)
-    _refresh_derived(refreshed)
-    return refreshed
-
-
 def apply_structured_updates_to_analysis(
-    analysis: BillsAPAnalysis,
+    analysis: InvoicesARAnalysis,
     updates: dict[str, str],
     file_path: Path,
-) -> BillsAPAnalysis:
+) -> InvoicesARAnalysis:
     """Apply an already validated AI patch without reparsing natural language."""
-    allowed = {"entity", "currency", "description_prefix", "split_vendor_code"}
+    allowed = {
+        "entity",
+        "currency",
+        "description_prefix",
+        "product",
+        "split_customer_code",
+        "include_po_number",
+    }
     unknown = set(updates) - allowed
     if unknown:
-        raise ValueError(f"Unsupported bills AP updates: {sorted(unknown)}")
+        raise ValueError(f"Unsupported invoices AR updates: {sorted(unknown)}")
 
     facts = dict(analysis.facts)
     facts.update(updates)
-    if "split_vendor_code" in facts and isinstance(facts["split_vendor_code"], str):
-        facts["split_vendor_code"] = facts["split_vendor_code"].lower() == "true"
+    for flag in ("split_customer_code", "include_po_number"):
+        if flag in facts and isinstance(facts[flag], str):
+            facts[flag] = facts[flag].lower() == "true"
 
-    refreshed = analyze_bills_ap_workbook(file_path)
+    refreshed = analyze_invoices_ar_workbook(file_path)
     refreshed.facts.update({key: value for key, value in facts.items() if value not in (None, "")})
     sheets = pd.read_excel(file_path, sheet_name=None, header=None, engine="openpyxl")
     _summarize_open_items(sheets, refreshed)
@@ -316,38 +304,38 @@ def apply_structured_updates_to_analysis(
     return refreshed
 
 
-def transform_open_ap_to_light_bills(
+def transform_open_ar_to_light_invoices(
     file_path: Path,
-    analysis: BillsAPAnalysis,
+    analysis: InvoicesARAnalysis,
 ) -> pd.DataFrame:
     missing = _missing_items(analysis)
     if missing:
         raise ValueError(
-            f"Bills (AP) upload is missing required information: {', '.join(missing)}"
+            f"Invoices (AR) upload is missing required information: {', '.join(missing)}"
         )
 
     sheets = pd.read_excel(file_path, sheet_name=None, header=None, engine="openpyxl")
     read = _read_detail_rows(sheets, analysis)
 
-    # Every open item keeps its sign: positive = invoice (bill), negative =
-    # credit note. Rows stay in report order for auditability.
+    # Every open item keeps its sign: positive = invoice, negative = credit
+    # note. Rows stay in report order for auditability.
     rows = [
         _output_row(detail, analysis)
         for detail in read["details"]
         if abs(detail.amount) > _ZERO_TOL
     ]
 
-    frame = pd.DataFrame(rows, columns=LIGHT_BILLS_AP_COLUMNS)
+    frame = pd.DataFrame(rows, columns=LIGHT_INVOICES_AR_COLUMNS)
     # Blank cells must reach the export as None, never NaN, so they land in
     # Excel as genuinely empty cells.
     return frame.astype(object).where(frame.notna(), None)
 
 
-def format_bills_ap_analysis_message(analysis: BillsAPAnalysis) -> str:
-    lines = ["I found an A/P aging detail report to load as Light bills."]
+def format_invoices_ar_analysis_message(analysis: InvoicesARAnalysis) -> str:
+    lines = ["I found an A/R aging detail report to load as Light customer invoices."]
 
     if analysis.source_sheet:
-        shape = "grouped by vendor" if analysis.layout == "grouped" else "one row per invoice"
+        shape = "grouped by customer" if analysis.layout == "grouped" else "one row per invoice"
         lines.append(
             f"- Source sheet: `{analysis.source_sheet}`, header row {analysis.header_row}, "
             f"{shape}, {analysis.detail_rows} detail rows."
@@ -370,10 +358,10 @@ def format_bills_ap_analysis_message(analysis: BillsAPAnalysis) -> str:
             f"{analysis.facts.get('currency', '')}".rstrip()
             + "."
         )
-    if analysis.credit_note_vendors:
+    if analysis.credit_note_customers:
         bits = [
-            f"{v['vendor_name']} ({v['count']} item(s), {_fmt_amount(v['total'])})"
-            for v in analysis.credit_note_vendors
+            f"{c['customer_name']} ({c['count']} item(s), {_fmt_amount(c['total'])})"
+            for c in analysis.credit_note_customers
         ]
         lines.append(
             "- Credit notes stay in the same format with a negative amount: "
@@ -399,11 +387,11 @@ def format_bills_ap_analysis_message(analysis: BillsAPAnalysis) -> str:
     if analysis.questions:
         lines.append("\nI need this before I can run it:")
         lines.extend(f"- {item}" for item in analysis.questions)
-        lines.append("\nReply with the missing fact, for example: `currency is GBP`.")
+        lines.append("\nReply with the missing fact, for example: `currency is USD`.")
     else:
         lines.append(
-            "\nReady to run. I will keep the original sheets and append the Bills (AP) upload "
-            "as a new working sheet."
+            "\nReady to run. I will keep the original sheets and append the Invoices (AR) "
+            "upload as a new working sheet."
         )
 
     return "\n".join(lines)
@@ -415,8 +403,8 @@ def format_bills_ap_analysis_message(analysis: BillsAPAnalysis) -> str:
 
 
 def _find_template_sheet(sheets: dict[str, pd.DataFrame]) -> dict | None:
-    """Find a Bills (AP) target template sheet (possibly with an example row)."""
-    target = {_normalise(c) for c in LIGHT_BILLS_AP_COLUMNS}
+    """Find an Invoices (AR) target template sheet (possibly with an example row)."""
+    target = {_normalise(c) for c in LIGHT_INVOICES_AR_COLUMNS}
     for name, df in sheets.items():
         for row_idx in range(min(10, len(df))):
             values = {_normalise(v) for v in df.iloc[row_idx].tolist() if pd.notna(v)}
@@ -454,10 +442,26 @@ def _detect_layout(sheet_name: str, df: pd.DataFrame, max_rows: int = 15) -> dic
                 "role_confidence": role_confidence,
                 "confidence": score,
             }
-    if not best or best["confidence"] < 0.45:
+    # The volume term is worth 0.30 on its own, so require real role evidence
+    # too, or any long non-AR sheet reads as an AR ledger just for being long.
+    if not best or best["confidence"] < 0.45 or _required_role_hits(best["roles"]) < 2:
         return None
     best["layout"] = _detect_grouping(df, best["header_row"], best["roles"])
     return best
+
+
+def _required_role_hits(roles: dict[str, str]) -> int:
+    """How many of the four things an AR invoice row needs were identified."""
+    return sum(
+        1
+        for group in (
+            ("invoice_number",),
+            ("customer_name",),
+            ("invoice_date", "due_date"),
+            ("open_amount", "amount"),
+        )
+        if any(role in roles for role in group)
+    )
 
 
 def _score_header_row(
@@ -484,24 +488,13 @@ def _score_header_row(
     if non_empty == 0:
         return 0.0, {}, {}
 
-    required_hits = sum(
-        1
-        for group in (
-            ("invoice_number",),
-            ("vendor_name",),
-            ("invoice_date", "due_date"),
-            ("open_amount", "amount"),
-        )
-        if any(role in roles for role in group)
-    )
-    role_score = required_hits / 4
-    bonus = len(set(roles) & {"currency", "transaction_type", "due_date", "age"}) / 6
+    role_score = _required_role_hits(roles) / 4
+    bonus = len(set(roles) & {"currency", "transaction_type", "due_date", "age", "po_number"}) / 6
     label_ratio = labelish / non_empty
 
     # Data volume is the term that stops a 1-row target template from beating
     # the real ledger just because its header labels are tidier.
-    data_rows = _count_data_rows(df, row_idx)
-    volume = min(data_rows / 10.0, 1.0)
+    volume = min(_count_data_rows(df, row_idx) / 10.0, 1.0)
 
     score = (
         (0.50 * role_score)
@@ -512,37 +505,32 @@ def _score_header_row(
     return round(min(score, 1.0), 3), roles, role_confidence
 
 
-def _count_data_rows(df: pd.DataFrame, header_row: int) -> int:
-    """Rows below the header carrying at least two populated cells."""
-    count = 0
-    for idx in range(header_row + 1, len(df)):
-        populated = sum(1 for v in df.iloc[idx].tolist() if not _is_blank(v))
-        if populated >= 2:
-            count += 1
-    return count
-
-
 def _detect_grouping(df: pd.DataFrame, header_row: int, roles: dict[str, str]) -> str:
-    """Decide whether vendor sits on its own group row instead of every row."""
-    vendor_idx = _column_index(df, header_row, roles.get("vendor_name"))
-    if vendor_idx is None:
+    """Decide whether customer sits on its own group row instead of every row."""
+    customer_idx = _column_index(df, header_row, roles.get("customer_name"))
+    if customer_idx is None:
         return "flat"
 
     group_rows = 0
     detail_rows = 0
     for idx in range(header_row + 1, len(df)):
         values = df.iloc[idx].tolist()
-        label = _clean_text(values[vendor_idx]) if vendor_idx < len(values) else ""
-        others = [v for i, v in enumerate(values) if i != vendor_idx and not _is_blank(v)]
+        label = _clean_text(values[customer_idx]) if customer_idx < len(values) else ""
+        others = [v for i, v in enumerate(values) if i != customer_idx and not _is_blank(v)]
         if not label and len(others) >= 2:
             detail_rows += 1
         elif label and not others and not _TOTAL_RE.match(label):
             # An amount-less "Total - ..." row (formula cache stripped on
-            # save) is a subtotal, not a vendor header; counting it as a
+            # save) is a subtotal, not a customer header; counting it as a
             # group flips real grouped reports to "flat".
             group_rows += 1
 
-    if group_rows >= 2 and detail_rows >= group_rows:
+    # One group header is enough evidence: an aging report with a single
+    # customer is still grouped, and reading it as flat drops every detail
+    # row because detail rows carry a blank customer cell. A truly flat
+    # sheet scores zero on both counters, so this cannot misfire there —
+    # and grouped reading keeps per-row customer cells anyway.
+    if group_rows >= 1 and detail_rows >= group_rows:
         return "grouped"
     return "flat"
 
@@ -564,16 +552,6 @@ def _match_role(header: str, claimed: set[str]) -> tuple[str, float] | None:
     return role, score
 
 
-def _column_index(df: pd.DataFrame, header_row: int, header: str | None) -> int | None:
-    if header is None:
-        return None
-    target = _normalise(header)
-    for idx, value in enumerate(df.iloc[header_row].tolist()):
-        if _normalise(value) == target:
-            return idx
-    return None
-
-
 # --------------------------------------------------------------------------
 # Reading detail rows
 # --------------------------------------------------------------------------
@@ -581,19 +559,20 @@ def _column_index(df: pd.DataFrame, header_row: int, header: str | None) -> int 
 
 @dataclass
 class _Detail:
-    vendor_raw: str
-    vendor_id: str
-    vendor_name: str
+    customer_raw: str
+    customer_id: str
+    customer_name: str
     txn_type: str
     invoice_number: str
     issue_date: str | None
     due_date: str | None
+    po_number: str
     amount: float
 
 
 def _read_detail_rows(
     sheets: dict[str, pd.DataFrame],
-    analysis: BillsAPAnalysis,
+    analysis: InvoicesARAnalysis,
 ) -> dict[str, Any]:
     """Walk the source sheet, returning detail rows plus any reported totals."""
     df = sheets[analysis.source_sheet]
@@ -603,52 +582,52 @@ def _read_detail_rows(
     idx = {
         role: _column_index(df, header_row, header) for role, header in roles.items()
     }
-    vendor_idx = idx.get("vendor_name")
+    customer_idx = idx.get("customer_name")
     amount_idx = idx.get("open_amount")
     if amount_idx is None:
         amount_idx = idx.get("amount")
 
     grouped = analysis.layout == "grouped"
-    split_code = analysis.facts.get("split_vendor_code", True)
+    split_code = analysis.facts.get("split_customer_code", True)
 
     details: list[_Detail] = []
     totals: list[tuple[str, float]] = []
-    current_vendor = ""
+    current_customer = ""
 
     for row_idx in range(header_row + 1, len(df)):
         values = df.iloc[row_idx].tolist()
         if all(_is_blank(v) for v in values):
             continue
 
-        vendor_cell = (
-            _clean_text(values[vendor_idx])
-            if vendor_idx is not None and vendor_idx < len(values)
+        customer_cell = (
+            _clean_text(values[customer_idx])
+            if customer_idx is not None and customer_idx < len(values)
             else ""
         )
         others = [
             v
             for i, v in enumerate(values)
-            if i != vendor_idx and not _is_blank(v)
+            if i != customer_idx and not _is_blank(v)
         ]
 
-        # Subtotal / grand total rows: "Total", "Total - Supplier", "Total - S002 ...".
-        if vendor_cell and _TOTAL_RE.match(vendor_cell):
+        # Subtotal / grand total rows: "Total", "Total - C117 Syneos Health, LLC".
+        if customer_cell and _TOTAL_RE.match(customer_cell):
             amount = _to_float(values[amount_idx]) if amount_idx is not None else None
             if amount is None:
                 amount = next((_to_float(v) for v in others if _to_float(v) is not None), None)
             if amount is not None:
-                totals.append((vendor_cell, amount))
+                totals.append((customer_cell, amount))
             continue
 
         # Group header row: a label alone on the row. Section headers such as
-        # "Supplier" are naturally superseded because the next group header
+        # "Customer" are naturally superseded because the next group header
         # overwrites them before any detail row is read.
-        if grouped and vendor_cell and not others:
-            current_vendor = vendor_cell
+        if grouped and customer_cell and not others:
+            current_customer = customer_cell
             continue
 
-        vendor_raw = vendor_cell or (current_vendor if grouped else "")
-        if not vendor_raw:
+        customer_raw = customer_cell or (current_customer if grouped else "")
+        if not customer_raw:
             continue
 
         amount = _to_float(values[amount_idx]) if amount_idx is not None else None
@@ -673,17 +652,23 @@ def _read_detail_rows(
             if idx.get("transaction_type") is not None
             else ""
         )
+        po_number = (
+            _clean_reference(values[idx["po_number"]])
+            if idx.get("po_number") is not None
+            else ""
+        )
 
-        vendor_id, vendor_name = _split_vendor(vendor_raw, split_code)
+        customer_id, customer_name = _split_customer(customer_raw, split_code)
         details.append(
             _Detail(
-                vendor_raw=vendor_raw,
-                vendor_id=vendor_id,
-                vendor_name=vendor_name,
+                customer_raw=customer_raw,
+                customer_id=customer_id,
+                customer_name=customer_name,
                 txn_type=txn_type,
                 invoice_number=invoice_number,
                 issue_date=issue_date,
                 due_date=due_date,
+                po_number=po_number,
                 amount=round(float(amount), 2),
             )
         )
@@ -691,13 +676,13 @@ def _read_detail_rows(
     return {"details": details, "totals": totals}
 
 
-def _split_vendor(vendor_raw: str, split_code: bool) -> tuple[str, str]:
+def _split_customer(customer_raw: str, split_code: bool) -> tuple[str, str]:
     if not split_code:
-        return "", vendor_raw
-    match = _VENDOR_CODE_RE.match(vendor_raw)
+        return "", customer_raw
+    match = _CUSTOMER_CODE_RE.match(customer_raw)
     if match:
         return match.group(1), match.group(2).strip()
-    return "", vendor_raw
+    return "", customer_raw
 
 
 # --------------------------------------------------------------------------
@@ -705,20 +690,20 @@ def _split_vendor(vendor_raw: str, split_code: bool) -> tuple[str, str]:
 # --------------------------------------------------------------------------
 
 
-def _summarize_open_items(sheets: dict[str, pd.DataFrame], analysis: BillsAPAnalysis) -> None:
+def _summarize_open_items(sheets: dict[str, pd.DataFrame], analysis: InvoicesARAnalysis) -> None:
     """Classify every open item by sign and reconcile against report totals.
 
-    Positive open balances are invoices (bills); negative open balances —
-    `Bill Payment` rows and vendor credits — become credit notes with a
-    negative amount. Nothing is netted, dropped, or held back, so the output
-    always ties to the report's own grand total.
+    Positive open balances are invoices; negative open balances — `Payment`
+    and `Credit Memo` rows — become credit notes with a negative amount.
+    Nothing is netted, dropped, or held back, so the output always ties to
+    the report's own grand total.
     """
     if not analysis.source_sheet:
         return
     try:
         read = _read_detail_rows(sheets, analysis)
     except Exception:
-        analysis.warnings.append("Could not read the AP detail rows from the source sheet.")
+        analysis.warnings.append("Could not read the AR detail rows from the source sheet.")
         return
 
     details: list[_Detail] = read["details"]
@@ -734,36 +719,26 @@ def _summarize_open_items(sheets: dict[str, pd.DataFrame], analysis: BillsAPAnal
     analysis.source_total = round(sum(d.amount for d in details), 2)
     analysis.reported_total = _grand_total(read["totals"])
 
-    by_vendor: dict[str, dict[str, Any]] = {}
+    by_customer: dict[str, dict[str, Any]] = {}
     for d in credit_notes:
-        entry = by_vendor.setdefault(
-            d.vendor_raw, {"vendor_name": d.vendor_name, "count": 0, "total": 0.0}
+        entry = by_customer.setdefault(
+            d.customer_raw, {"customer_name": d.customer_name, "count": 0, "total": 0.0}
         )
         entry["count"] += 1
         entry["total"] = round(entry["total"] + d.amount, 2)
-    analysis.credit_note_vendors = [by_vendor[key] for key in sorted(by_vendor)]
+    analysis.credit_note_customers = [by_customer[key] for key in sorted(by_customer)]
 
     analysis.split_example = next(
         (
-            {"raw": d.vendor_raw, "id": d.vendor_id, "name": d.vendor_name}
+            {"raw": d.customer_raw, "id": d.customer_id, "name": d.customer_name}
             for d in details
-            if d.vendor_id
+            if d.customer_id
         ),
         None,
     )
-    analysis.missing_date_vendors = sorted(
-        {d.vendor_name for d in details if abs(d.amount) > _ZERO_TOL and not d.issue_date}
+    analysis.missing_date_customers = sorted(
+        {d.customer_name for d in details if abs(d.amount) > _ZERO_TOL and not d.issue_date}
     )
-
-
-def _grand_total(totals: list[tuple[str, float]]) -> float | None:
-    """Pick the report's own grand total, preferring a bare "Total" row."""
-    if not totals:
-        return None
-    for label, amount in reversed(totals):
-        if _normalise(label) == "total":
-            return round(amount, 2)
-    return round(totals[-1][1], 2)
 
 
 # --------------------------------------------------------------------------
@@ -773,12 +748,13 @@ def _grand_total(totals: list[tuple[str, float]]) -> float | None:
 
 def _infer_facts(
     sheets: dict[str, pd.DataFrame],
-    analysis: BillsAPAnalysis,
+    analysis: InvoicesARAnalysis,
     template: dict | None,
 ) -> dict[str, Any]:
     facts: dict[str, Any] = {
         "description_prefix": _DEFAULT_DESCRIPTION_PREFIX,
-        "split_vendor_code": True,
+        "split_customer_code": True,
+        "include_po_number": True,
     }
 
     title = _read_title_block(sheets, analysis)
@@ -791,7 +767,7 @@ def _infer_facts(
     # statement of what the user wants, so it wins over the title block.
     if template:
         example = _read_template_example(sheets, template)
-        for key in ("entity", "currency", "description_prefix"):
+        for key in ("entity", "currency", "description_prefix", "product"):
             if example.get(key):
                 facts[key] = example[key]
 
@@ -800,13 +776,19 @@ def _infer_facts(
         if currency:
             facts["currency"] = currency
 
+    facts.setdefault("product", facts["description_prefix"])
     return facts
 
 
 def _read_title_block(
-    sheets: dict[str, pd.DataFrame], analysis: BillsAPAnalysis
+    sheets: dict[str, pd.DataFrame], analysis: InvoicesARAnalysis
 ) -> dict[str, Any]:
-    """Read entity name and 'As of' date from the rows above the header."""
+    """Read entity name and 'As of' date from the rows above the header.
+
+    QuickBooks titles a multi-entity report "company : entity"
+    ("causaLens : causaLens US"); the leaf entity on the right is the one the
+    report is about, so it wins over a bare company-name row.
+    """
     out: dict[str, Any] = {}
     if not analysis.source_sheet or not analysis.header_row:
         return out
@@ -826,6 +808,11 @@ def _read_title_block(
             continue
         if _looks_numeric(text):
             continue
+        if ":" in text:
+            parts = [part.strip() for part in text.split(":") if part.strip()]
+            if len(parts) >= 2:
+                out["entity"] = parts[-1]
+                continue
         out.setdefault("entity", text)
     return out
 
@@ -863,22 +850,18 @@ def _read_template_example(
             prefix = _description_prefix(_clean_text(values[desc_idx]))
             if prefix:
                 out["description_prefix"] = prefix
+
+        product_idx = headers.get("product")
+        if product_idx is not None and product_idx < len(values):
+            product = _clean_text(values[product_idx])
+            if product:
+                out["product"] = product
         break
     return out
 
 
-def _description_prefix(description: str) -> str | None:
-    """"Data migration - 3428325" -> "Data migration"."""
-    if not description:
-        return None
-    match = re.match(r"^(.*?)\s*-\s*\S+$", description)
-    if match and match.group(1).strip():
-        return match.group(1).strip()
-    return description
-
-
 def _currency_from_source(
-    sheets: dict[str, pd.DataFrame], analysis: BillsAPAnalysis
+    sheets: dict[str, pd.DataFrame], analysis: InvoicesARAnalysis
 ) -> str | None:
     """Read a single consistent currency code from a source currency column."""
     header = analysis.roles.get("currency")
@@ -904,30 +887,39 @@ def _currency_from_source(
 # --------------------------------------------------------------------------
 
 
-def _output_row(detail: _Detail, analysis: BillsAPAnalysis) -> dict[str, Any]:
+def _output_row(detail: _Detail, analysis: InvoicesARAnalysis) -> dict[str, Any]:
     invoice_number = detail.invoice_number
     prefix = analysis.facts.get("description_prefix", _DEFAULT_DESCRIPTION_PREFIX)
     description = f"{prefix} - {invoice_number}" if invoice_number else prefix
+    include_po = analysis.facts.get("include_po_number", True)
 
-    row = {col: None for col in LIGHT_BILLS_AP_COLUMNS}
+    row = {col: None for col in LIGHT_INVOICES_AR_COLUMNS}
     row.update(
         {
-            "Vendor": detail.vendor_name,
-            "Vendor ID": detail.vendor_id or None,
             "Entity": analysis.facts.get("entity"),
+            # These are the outstanding items as of the report date.
+            "Invoice Status": "Open",
+            "Customer": detail.customer_name,
+            "Customer ID": detail.customer_id or None,
             # Kept as text: invoice numbers like "May/July 26" and "2026-13"
             # must never be coerced to a number or a date.
             "Invoice Number": invoice_number or None,
-            "Issue Date": detail.issue_date,
+            "Invoice Date": detail.issue_date,
             "Due Date": detail.due_date or detail.issue_date,
             "Currency": analysis.facts.get("currency"),
+            "PO Number": (detail.po_number or None) if include_po else None,
             "Description": description,
             # The sign carries the document type: a positive amount is an
-            # invoice (bill), a negative amount is a credit note.
+            # invoice, a negative amount is a credit note.
             "Invoice Currency Amount": detail.amount,
             # The aging report carries a single currency, so the invoice
             # currency is the entity's local currency and no rate applies.
             "Local Currency Amount": detail.amount,
+            # One line per item, matching the worked example: the open
+            # balance as a single unit-priced product line.
+            "Product": analysis.facts.get("product", prefix),
+            "Quantity": 1,
+            "Unit Price": detail.amount,
         }
     )
     return row
@@ -938,14 +930,14 @@ def _output_row(detail: _Detail, analysis: BillsAPAnalysis) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
-def _missing_items(analysis: BillsAPAnalysis) -> list[str]:
+def _missing_items(analysis: InvoicesARAnalysis) -> list[str]:
     missing: list[str] = []
     if not analysis.source_sheet or analysis.header_row is None:
         missing.append("source_sheet")
     if "invoice_number" not in analysis.roles:
         missing.append("invoice_number")
-    if "vendor_name" not in analysis.roles:
-        missing.append("vendor_name")
+    if "customer_name" not in analysis.roles:
+        missing.append("customer_name")
     if not any(r in analysis.roles for r in ("open_amount", "amount")):
         missing.append("amount")
     if not analysis.facts.get("entity"):
@@ -957,55 +949,63 @@ def _missing_items(analysis: BillsAPAnalysis) -> list[str]:
     return missing
 
 
-def _refresh_derived(analysis: BillsAPAnalysis) -> None:
+def _refresh_derived(analysis: InvoicesARAnalysis) -> None:
     analysis.assumptions = _infer_assumptions(analysis)
     analysis.questions = _missing_questions(analysis)
     analysis.warnings = _infer_warnings(analysis)
 
 
-def _infer_assumptions(analysis: BillsAPAnalysis) -> list[str]:
+def _infer_assumptions(analysis: InvoicesARAnalysis) -> list[str]:
     facts = analysis.facts
     assumptions = [
         "One row per open item, at its open balance as of the report date — not the "
         "original document amount.",
         "A positive amount is an invoice; a negative amount is a credit note in the same "
-        "format. Payments, credits and zero-balance vendors are never netted or dropped, "
-        "so the upload ties to the report total.",
+        "format. Payments, credit memos and zero-balance customers are never netted or "
+        "dropped, so the upload ties to the report total.",
         f"Entity `{facts.get('entity', '?')}` and currency `{facts.get('currency', '?')}` "
         "apply to every row; the report has no per-row entity or currency.",
         "Invoice currency amount equals local currency amount, so no FX rate is applied.",
+        f"Each row gets Invoice Status `Open` and one line: Product "
+        f"`{facts.get('product', _DEFAULT_DESCRIPTION_PREFIX)}`, Quantity 1, Unit Price equal "
+        "to the open balance — matching the worked example.",
     ]
-    if facts.get("split_vendor_code", True) and analysis.split_example:
+    if facts.get("split_customer_code", True) and analysis.split_example:
         example = analysis.split_example
         assumptions.append(
-            f"Vendor strings are split into code and name "
-            f"(`{example['raw']}` -> Vendor ID `{example['id']}`, "
-            f"Vendor `{example['name']}`). Say `do not split vendor code` to "
-            "keep the full string in Vendor instead."
+            f"Customer strings are split into code and name "
+            f"(`{example['raw']}` -> Customer ID `{example['id']}`, "
+            f"Customer `{example['name']}`). Say `do not split the customer code` "
+            "to keep the full string in Customer instead."
+        )
+    if facts.get("include_po_number", True) and "po_number" in analysis.roles:
+        assumptions.append(
+            f"Customer PO references from `{analysis.roles['po_number']}` are carried into "
+            "`PO Number`. Say `leave the PO number blank` to drop them."
         )
     assumptions.append(
-        "Line-level columns (Account, Line Amount, Tax Code, amortization) are left blank, "
-        "matching the worked example — these are header-level migration bills."
+        "Tax, account, billing and accrual columns are left blank, matching the worked "
+        "example — Light derives them from the product and entity settings."
     )
     return assumptions
 
 
-def _missing_questions(analysis: BillsAPAnalysis) -> list[str]:
+def _missing_questions(analysis: InvoicesARAnalysis) -> list[str]:
     questions = []
     for item in _missing_items(analysis):
         if item == "entity":
-            questions.append("Which Light entity should these bills belong to?")
+            questions.append("Which Light entity should these invoices belong to?")
         elif item == "currency":
             questions.append(
-                "Which currency are these bills in? The report has no currency column."
+                "Which currency are these invoices in? The report has no currency column."
             )
         elif item == "source_sheet":
-            questions.append("Which sheet contains the open AP invoice detail?")
+            questions.append("Which sheet contains the open AR invoice detail?")
         elif item == "amount":
             questions.append("Which column holds the open balance to migrate?")
         elif item == "open_items":
             questions.append(
-                "No open AP rows could be read from the source sheet. Which rows hold "
+                "No open AR rows could be read from the source sheet. Which rows hold "
                 "the open invoices and credit notes?"
             )
         else:
@@ -1013,7 +1013,7 @@ def _missing_questions(analysis: BillsAPAnalysis) -> list[str]:
     return questions
 
 
-def _infer_warnings(analysis: BillsAPAnalysis) -> list[str]:
+def _infer_warnings(analysis: InvoicesARAnalysis) -> list[str]:
     warnings: list[str] = []
 
     if analysis.reported_total is not None and analysis.source_total is not None:
@@ -1036,60 +1036,10 @@ def _infer_warnings(analysis: BillsAPAnalysis) -> list[str]:
             f"{analysis.zero_rows} open item(s) with a zero amount were skipped."
         )
 
-    if analysis.missing_date_vendors:
+    if analysis.missing_date_customers:
         warnings.append(
-            "Rows with no readable issue date for: "
-            + ", ".join(analysis.missing_date_vendors[:5])
+            "Rows with no readable invoice date for: "
+            + ", ".join(analysis.missing_date_customers[:5])
             + "."
         )
     return warnings
-
-
-# --------------------------------------------------------------------------
-# Small helpers
-# --------------------------------------------------------------------------
-
-
-def _mentions_disable_vendor_id(message: str) -> bool:
-    return bool(
-        re.search(
-            r"(do\s*not|don'?t|no)\s+(split|separate)\s+(the\s+)?vendor",
-            message,
-            re.IGNORECASE,
-        )
-    )
-
-
-def _parse_named_value(message: str, names: tuple[str, ...]) -> str | None:
-    for name in names:
-        pattern = rf"\b{re.escape(name)}\b\s*(?:is|=|:)\s*([^\n,;]+)"
-        match = re.search(pattern, message, flags=re.IGNORECASE)
-        if match:
-            return match.group(1).strip().strip("`'\"")
-    return None
-
-
-def _is_blank(value: Any) -> bool:
-    if value is None:
-        return True
-    if isinstance(value, float) and pd.isna(value):
-        return True
-    return str(value).strip() == ""
-
-
-def _looks_numeric(value: Any) -> bool:
-    if isinstance(value, bool):
-        return False
-    if isinstance(value, (int, float)):
-        return True
-    try:
-        float(str(value).replace(",", ""))
-        return True
-    except ValueError:
-        return False
-
-
-def _fmt_amount(value: float | None) -> str:
-    if value is None:
-        return "n/a"
-    return f"{value:,.2f}"

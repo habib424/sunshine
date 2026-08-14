@@ -41,4 +41,5 @@ def list_intents() -> list[dict]:
             "action": spec["action"],
         }
         for name, spec in INTENTS.items()
+        if not spec.get("hidden", False)
     ]

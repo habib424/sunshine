@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
@@ -17,6 +18,11 @@ async def upload_files(files: list[UploadFile], db: AsyncSession = Depends(get_d
     results = []
     for file in files:
         content = await file.read()
+        duplicate = await _find_duplicate_upload(db, content)
+        if duplicate is not None:
+            results.append(duplicate)
+            continue
+
         file_id, dest_path = save_upload(content, file.filename)
 
         try:
@@ -41,6 +47,7 @@ async def upload_files(files: list[UploadFile], db: AsyncSession = Depends(get_d
     return [UploadResponse(
         id=u.id,
         filename=u.filename,
+
         original_name=u.original_name,
         file_type=u.file_type,
         status=u.status,
@@ -49,6 +56,24 @@ async def upload_files(files: list[UploadFile], db: AsyncSession = Depends(get_d
         column_headers=u.column_headers,
         sheet_names=u.sheet_names,
     ) for u in results]
+
+
+async def _find_duplicate_upload(db: AsyncSession, content: bytes) -> UploadedFile | None:
+    """Reuse an identical prior upload instead of creating another copy."""
+    expected_hash = hashlib.sha256(content).digest()
+    result = await db.execute(select(UploadedFile).order_by(UploadedFile.uploaded_at.desc()))
+    for upload in result.scalars():
+        path = Path(upload.storage_path)
+        if path.stem.endswith(".computed"):
+            original = path.with_name(path.name.replace(".computed", "", 1))
+            if original.exists():
+                path = original
+        try:
+            if path.exists() and hashlib.sha256(path.read_bytes()).digest() == expected_hash:
+                return upload
+        except OSError:
+            continue
+    return None
 
 
 @router.get("", response_model=list[UploadResponse])

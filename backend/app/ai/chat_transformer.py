@@ -15,31 +15,43 @@ from pathlib import Path
 import pandas as pd
 
 from app.ai.client import get_client
+from app.ai.intent_interpreter import (
+    AIInterpretationError,
+    IntentInterpretation,
+    interpret_intent_instruction,
+)
 from app.engine.bills_ap import (
     analyze_bills_ap_workbook,
-    apply_user_message_to_analysis as apply_user_message_to_bills_ap_analysis,
+    apply_structured_updates_to_analysis as apply_structured_updates_to_bills_ap_analysis,
     format_bills_ap_analysis_message,
     transform_open_ap_to_light_bills,
 )
 from app.engine.deferrals import (
     DEFERRAL_INTENTS,
     analyze_deferral_workbook,
-    apply_user_message_to_analysis,
-    format_deferral_analysis_message,
+    apply_structured_updates_to_analysis as apply_structured_updates_to_deferral_analysis,
+    format_deferral_conversation_message,
     intent_to_direction,
     transform_deferrals_to_light_je,
 )
 from app.engine.fx_adjustment import (
     FX_ADJUSTMENT_INTENTS,
     analyze_fx_workbook,
-    apply_user_message_to_analysis as apply_user_message_to_fx_analysis,
+    apply_structured_updates_to_analysis as apply_structured_updates_to_fx_analysis,
     format_fx_analysis_message,
     transform_fx_adjustments,
+)
+from app.engine.invoices_ar import (
+    OPEN_AR_INTENTS,
+    analyze_invoices_ar_workbook,
+    apply_structured_updates_to_analysis as apply_structured_updates_to_invoices_ar_analysis,
+    format_invoices_ar_analysis_message,
+    transform_open_ar_to_light_invoices,
 )
 from app.engine.open_ap import (
     OPEN_AP_INTENTS,
     analyze_open_ap_workbook,
-    apply_user_message_to_analysis as apply_user_message_to_open_ap_analysis,
+    apply_structured_updates_to_analysis as apply_structured_updates_to_open_ap_analysis,
     format_open_ap_analysis_message,
     transform_open_ap_to_light_ap,
 )
@@ -133,6 +145,17 @@ When generating the script, wrap it in a ```python code block.
 IMPORTANT: Only generate the script when the user explicitly approves the plan. Until then, just discuss and refine the plan."""
 
 
+VALIDATION_SYSTEM_PROMPT = """You are Sunshine, an expert ERP validation assistant.
+The deterministic validation engine has already inspected this workbook. Its verified findings are below:
+
+{validation_context}
+
+Use only those verified findings when stating whether the file passes or fails.
+Explain them in clear business language and answer every follow-up instruction or question with AI.
+Never invent rows, account validity, balances, or errors that are absent from the verified findings.
+Do not propose a transformation and never generate executable code.
+If a requested conclusion cannot be supported by the findings, say what additional deterministic check is needed."""
+
 def _get_validation_rules_context() -> str:
     """Build a summary of active validation rules for the AI system prompt."""
     try:
@@ -150,6 +173,46 @@ def _get_validation_rules_context() -> str:
     except Exception:
         return ""
 
+
+def _deterministic_validation_context(file_path: Path) -> dict:
+    """Return compact immutable findings for the validation AI to explain."""
+    try:
+        import app.engine.validators  # noqa: F401 - register validators
+        from app.engine.ingest.layout import apply_layout
+        from app.engine.ingest.orchestrator import ingest
+        from app.engine.registry import get_validator
+
+        result = ingest(file_path, "validate_je")
+        dataframe = result.dataframe
+        if dataframe is None and result.layout.get("sheet") is not None:
+            dataframe = apply_layout(file_path, result.layout)
+
+        context = {
+            "status": result.status,
+            "rows": 0 if dataframe is None else int(len(dataframe)),
+            "confidence": result.confidence,
+            "layout": {
+                "sheet": result.layout.get("sheet"),
+                "header_row": result.layout.get("header_row"),
+                "column_roles": result.layout.get("column_roles", {}),
+                "missing_required": result.layout.get("missing_required", []),
+            },
+            "unresolved": result.unresolved,
+            "issue_summary": [],
+        }
+        if dataframe is not None:
+            issues = get_validator("journal_entry_contract")(dataframe, {})
+            summary: dict[tuple[str, str], int] = {}
+            for issue in issues:
+                key = (issue.get("issue_code", "UNKNOWN"), issue.get("severity", "warning"))
+                summary[key] = summary.get(key, 0) + 1
+            context["issue_summary"] = [
+                {"code": code, "severity": severity, "count": count}
+                for (code, severity), count in sorted(summary.items())
+            ]
+        return context
+    except Exception as exc:
+        return {"status": "analysis_failed", "error": str(exc)}
 
 def _read_file_structure(file_path: Path) -> dict:
     import openpyxl
@@ -181,7 +244,7 @@ def create_session(file_path: Path, goal: str = "journal_entry", intent: str = "
     file_structure = _read_file_structure(file_path)
 
     if intent in DEFERRAL_INTENTS:
-        direction = intent_to_direction(intent)
+        direction = intent_to_direction(intent, file_path)
         analysis = analyze_deferral_workbook(file_path, direction)
         target = TARGET_SCHEMAS.get("light_journal_entry_v2", {})
         system = (
@@ -207,6 +270,15 @@ def create_session(file_path: Path, goal: str = "journal_entry", intent: str = "
                 "Posting reference lines, not generated code. "
                 f"Target columns: {json.dumps(target.get('columns', []))}"
             )
+    elif intent in OPEN_AR_INTENTS:
+        analysis = analyze_invoices_ar_workbook(file_path)
+        target = TARGET_SCHEMAS.get("light_invoices_ar_upload", {})
+        system = (
+            "Deterministic open AR upload session (Light Invoices (AR) output). "
+            "The assistant should use detected aging-report roles, per-customer "
+            "payment netting and structured facts, not generated code. "
+            f"Target columns: {json.dumps(target.get('columns', []))}"
+        )
     elif intent in FX_ADJUSTMENT_INTENTS:
         analysis = analyze_fx_workbook(file_path)
         target = TARGET_SCHEMAS.get("light_fx_adjustment", {})
@@ -215,6 +287,12 @@ def create_session(file_path: Path, goal: str = "journal_entry", intent: str = "
             "use detected bank balance roles and structured facts, not generated "
             "code. "
             f"Target columns: {json.dumps(target.get('columns', []))}"
+        )
+    elif intent == "validate_je":
+        target = TARGET_SCHEMAS.get("light_journal_entry", {})
+        validation_context = _deterministic_validation_context(file_path)
+        system = VALIDATION_SYSTEM_PROMPT.format(
+            validation_context=json.dumps(validation_context, indent=2),
         )
     elif intent == "reconcile_je_to_gl":
         target = TARGET_SCHEMAS.get("reconciliation_report", {})
@@ -245,6 +323,8 @@ def create_session(file_path: Path, goal: str = "journal_entry", intent: str = "
     if intent in OPEN_AP_INTENTS:
         _sessions[session_id]["open_ap_mode"] = open_ap_mode
         _sessions[session_id]["open_ap_analysis"] = analysis
+    if intent in OPEN_AR_INTENTS:
+        _sessions[session_id]["invoices_ar_analysis"] = analysis
     if intent in FX_ADJUSTMENT_INTENTS:
         _sessions[session_id]["fx_analysis"] = analysis
 
@@ -262,6 +342,8 @@ def chat(session_id: str, user_message: str) -> dict:
         return _chat_deferral(session_id, user_message)
     if session.get("intent") in OPEN_AP_INTENTS:
         return _chat_open_ap(session_id, user_message)
+    if session.get("intent") in OPEN_AR_INTENTS:
+        return _chat_invoices_ar(session_id, user_message)
     if session.get("intent") in FX_ADJUSTMENT_INTENTS:
         return _chat_fx(session_id, user_message)
 
@@ -284,7 +366,7 @@ def chat(session_id: str, user_message: str) -> dict:
     session["messages"].append({"role": "assistant", "content": response.content})
 
     # Check if response contains a Python script
-    script = _extract_script(assistant_text)
+    script = None if session.get("intent") == "validate_je" else _extract_script(assistant_text)
     if script:
         session["script"] = script
 
@@ -306,6 +388,8 @@ def execute_script(session_id: str, output_path: Path) -> dict:
         return _execute_deferral(session, output_path)
     if session.get("intent") in OPEN_AP_INTENTS:
         return _execute_open_ap(session, output_path)
+    if session.get("intent") in OPEN_AR_INTENTS:
+        return _execute_invoices_ar(session, output_path)
     if session.get("intent") in FX_ADJUSTMENT_INTENTS:
         return _execute_fx(session, output_path)
 
@@ -377,9 +461,14 @@ def get_session(session_id: str) -> dict | None:
     if session.get("intent") in OPEN_AP_INTENTS:
         analysis = session.get("open_ap_analysis")
         has_script = bool(analysis and analysis.ready)
+    if session.get("intent") in OPEN_AR_INTENTS:
+        analysis = session.get("invoices_ar_analysis")
+        has_script = bool(analysis and analysis.ready)
     if session.get("intent") in FX_ADJUSTMENT_INTENTS:
         analysis = session.get("fx_analysis")
         has_script = bool(analysis and analysis.ready)
+    if session.get("ai_instruction_pending"):
+        has_script = False
     return {
         "session_id": session_id,
         "message_count": len(session["messages"]),
@@ -397,30 +486,267 @@ def _extract_script(text: str) -> str | None:
     return None
 
 
-def _chat_fx(session_id: str, user_message: str) -> dict:
+def _analysis_state(analysis: object, *, mode: str | None = None) -> dict:
+    """Return compact, verified context for AI language interpretation."""
+    raw = analysis.to_dict() if hasattr(analysis, "to_dict") else {}
+    facts = {
+        key: value
+        for key, value in raw.get("facts", {}).items()
+        if not str(key).startswith("_")
+    }
+    state = {
+        "mode": mode,
+        "source_sheet": raw.get("source_sheet"),
+        "source_sheets": raw.get("source_sheets", []),
+        "header_row": raw.get("header_row"),
+        "roles": raw.get("roles", {}),
+        "facts": facts,
+        "questions": raw.get("questions", []),
+        "warnings": raw.get("warnings", [])[:8],
+        "ready": raw.get("ready", False),
+    }
+    for key in (
+        "direction",
+        "valid_source_rows",
+        "detail_rows",
+        "source_total",
+        "invoice_rows",
+        "invoice_total",
+        "credit_note_rows",
+        "credit_note_total",
+        "reported_total",
+    ):
+        if key in raw:
+            state[key] = raw[key]
+    if "adjustments" in raw:
+        state["adjustments"] = raw["adjustments"][:12]
+        state["adjustment_count"] = len(raw["adjustments"])
+    return state
+
+
+def _changed_facts(before: object, after: object) -> dict[str, object]:
+    before_facts = dict(getattr(before, "facts", {}))
+    after_facts = dict(getattr(after, "facts", {}))
+    changes = {
+        key: value
+        for key, value in after_facts.items()
+        if not key.startswith("_") and before_facts.get(key) != value
+    }
+    if getattr(before, "direction", None) != getattr(after, "direction", None):
+        changes["direction"] = getattr(after, "direction", None)
+    return changes
+
+
+_FRIENDLY_FIELDS = {
+    "direction": "direction",
+    "entity": "entity",
+    "ledger": "ledger",
+    "currency": "currency",
+    "local_currency": "local currency",
+    "posting_date": "posting date",
+    "release_start_date": "release start",
+    "release_end_date": "release end",
+    "release_end_offset_years": "release duration",
+    "release_template": "release template",
+    "description_prefix": "description",
+    "deferral_account": "balance-sheet account",
+    "release_account": "P&L account",
+    "ap_account": "AP account",
+    "clearing_account": "clearing account",
+    "document_year": "document year",
+    "split_vendor_code": "vendor-code handling",
+    "product": "product",
+    "split_customer_code": "customer-code handling",
+    "include_po_number": "PO-number handling",
+}
+
+
+def _verified_ai_reply(
+    analysis: object,
+    interpretation: IntentInterpretation,
+    changes: dict[str, object],
+) -> str:
+    """Render only updates the deterministic engine actually accepted."""
+    lines: list[str] = []
+
+    def display(field: str, value: object) -> str:
+        label = _FRIENDLY_FIELDS.get(field, field.replace("_", " "))
+        if field == "release_end_offset_years":
+            value = f"{value} year(s) after the release start"
+        return f"{label}: {value}"
+
+    if changes:
+        lines.append(
+            "I understood and applied: "
+            + "; ".join(display(field, value) for field, value in changes.items())
+            + "."
+        )
+
+    confirmed = {
+        field: value
+        for field, value in interpretation.updates.items()
+        if field not in changes
+    }
+    if confirmed:
+        lines.append(
+            "I also confirmed: "
+            + "; ".join(display(field, value) for field, value in confirmed.items())
+            + "."
+        )
+
+    if not changes and not confirmed:
+        if interpretation.clarification_question:
+            lines.append("I need one clarification: " + interpretation.clarification_question)
+        else:
+            lines.append(
+                "I evaluated that instruction with AI, but it did not contain a "
+                "supported change I could safely apply."
+            )
+
+    questions = list(getattr(analysis, "questions", []) or [])
+    if not interpretation.clarification_question:
+        if questions:
+            lines.append("I still need:")
+            lines.extend(f"- {question}" for question in questions)
+        elif getattr(analysis, "ready", False):
+            lines.append("Everything required is confirmed. It is ready to run.")
+    return "\n".join(lines)
+
+def _ai_failure_reply() -> str:
+    return (
+        "I could not evaluate that instruction with AI, so I did not change the plan. "
+        "Please try again; Sunshine will not silently fall back to keyword matching."
+    )
+
+
+def _chat_invoices_ar(session_id: str, user_message: str) -> dict:
     session = _sessions[session_id]
     file_path = Path(session["file_path"])
+    initial = not session["messages"]
 
     session["messages"].append({"role": "user", "content": user_message})
-    analysis = session.get("fx_analysis")
+    analysis = session.get("invoices_ar_analysis")
     if analysis is None:
-        analysis = analyze_fx_workbook(file_path)
+        analysis = analyze_invoices_ar_workbook(file_path)
 
-    # The initial API call supplies a long task instruction. Treat later
-    # messages as corrections/facts such as "clearing account is 900300".
-    if len(session["messages"]) > 1:
-        analysis = apply_user_message_to_fx_analysis(analysis, user_message, file_path)
+    try:
+        interpretation = interpret_intent_instruction(
+            intent=session["intent"],
+            user_message=user_message,
+            state=_analysis_state(analysis),
+            initial=initial,
+        )
+    except AIInterpretationError:
+        session["ai_instruction_pending"] = True
+        assistant_text = _ai_failure_reply()
+        session["messages"].append({"role": "assistant", "content": assistant_text})
+        return {"message": assistant_text, "has_script": False, "session_id": session_id}
 
-    session["fx_analysis"] = analysis
-    assistant_text = format_fx_analysis_message(analysis)
+    changes: dict[str, object] = {}
+    if not initial and interpretation.understood and not interpretation.clarification_question:
+        before = analysis
+        analysis = apply_structured_updates_to_invoices_ar_analysis(
+            analysis, interpretation.updates, file_path
+        )
+        changes = _changed_facts(before, analysis)
+
+    session["invoices_ar_analysis"] = analysis
+    session["ai_instruction_pending"] = False
+    assistant_text = (
+        format_invoices_ar_analysis_message(analysis)
+        if initial
+        else _verified_ai_reply(analysis, interpretation, changes)
+    )
     session["messages"].append({"role": "assistant", "content": assistant_text})
-
     return {
         "message": assistant_text,
         "has_script": analysis.ready,
         "session_id": session_id,
     }
 
+def _execute_invoices_ar(session: dict, output_path: Path) -> dict:
+    analysis = session.get("invoices_ar_analysis")
+    if analysis is None:
+        file_path = Path(session["file_path"])
+        analysis = analyze_invoices_ar_workbook(file_path)
+        session["invoices_ar_analysis"] = analysis
+    if not analysis.ready:
+        missing = analysis.questions or ["The open AR upload is missing required facts."]
+        return {"success": False, "error": " ".join(missing)}
+
+    df = transform_open_ar_to_light_invoices(Path(session["file_path"]), analysis)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    from app.engine.pipeline import run_export
+
+    source_path = Path(session["file_path"])
+    topic = output_path.stem
+    src_stem = source_path.stem
+    if topic.startswith(src_stem):
+        topic = topic[len(src_stem):].lstrip("_- ") or src_stem
+
+    run_export(
+        df,
+        output_path,
+        source_file_path=source_path,
+        working_sheet_topic=topic or "Light_AR_Upload",
+    )
+
+    return {
+        "success": True,
+        "rows": len(df),
+        "columns": list(df.columns),
+        "preview": {
+            "headers": [str(c) for c in df.columns],
+            "rows": df.head(10).fillna("").values.tolist(),
+        },
+    }
+
+
+def _chat_fx(session_id: str, user_message: str) -> dict:
+    session = _sessions[session_id]
+    file_path = Path(session["file_path"])
+    initial = not session["messages"]
+
+    session["messages"].append({"role": "user", "content": user_message})
+    analysis = session.get("fx_analysis")
+    if analysis is None:
+        analysis = analyze_fx_workbook(file_path)
+
+    try:
+        interpretation = interpret_intent_instruction(
+            intent=session["intent"],
+            user_message=user_message,
+            state=_analysis_state(analysis),
+            initial=initial,
+        )
+    except AIInterpretationError:
+        session["ai_instruction_pending"] = True
+        assistant_text = _ai_failure_reply()
+        session["messages"].append({"role": "assistant", "content": assistant_text})
+        return {"message": assistant_text, "has_script": False, "session_id": session_id}
+
+    changes: dict[str, object] = {}
+    if not initial and interpretation.understood and not interpretation.clarification_question:
+        before = analysis
+        analysis = apply_structured_updates_to_fx_analysis(
+            analysis, interpretation.updates, file_path
+        )
+        changes = _changed_facts(before, analysis)
+
+    session["fx_analysis"] = analysis
+    session["ai_instruction_pending"] = False
+    assistant_text = (
+        format_fx_analysis_message(analysis)
+        if initial
+        else _verified_ai_reply(analysis, interpretation, changes)
+    )
+    session["messages"].append({"role": "assistant", "content": assistant_text})
+    return {
+        "message": assistant_text,
+        "has_script": analysis.ready,
+        "session_id": session_id,
+    }
 
 def _execute_fx(session: dict, output_path: Path) -> dict:
     analysis = session.get("fx_analysis")
@@ -464,34 +790,55 @@ def _execute_fx(session: dict, output_path: Path) -> dict:
 def _chat_deferral(session_id: str, user_message: str) -> dict:
     session = _sessions[session_id]
     file_path = Path(session["file_path"])
+    initial = not session["messages"]
 
     session["messages"].append({"role": "user", "content": user_message})
     analysis = session.get("deferral_analysis")
     if analysis is None:
-        analysis = analyze_deferral_workbook(file_path, intent_to_direction(session["intent"]))
+        analysis = analyze_deferral_workbook(
+            file_path, intent_to_direction(session["intent"], file_path)
+        )
 
-    # The initial API call sends a long system-ish user message. Avoid parsing
-    # that as user corrections; for later messages, update facts from plain
-    # English snippets like "currency is EUR" or "posting date 2026-03-01".
-    if len(session["messages"]) > 1:
-        analysis = apply_user_message_to_analysis(analysis, user_message, file_path)
+    try:
+        interpretation = interpret_intent_instruction(
+            intent=session["intent"],
+            user_message=user_message,
+            state=_analysis_state(analysis),
+            initial=initial,
+        )
+    except AIInterpretationError:
+        session["ai_instruction_pending"] = True
+        assistant_text = _ai_failure_reply()
+        session["messages"].append({"role": "assistant", "content": assistant_text})
+        return {"message": assistant_text, "has_script": False, "session_id": session_id}
+
+    changes: dict[str, object] = {}
+    if not initial and interpretation.understood and not interpretation.clarification_question:
+        before = analysis
+        analysis = apply_structured_updates_to_deferral_analysis(
+            analysis, interpretation.updates, file_path
+        )
+        changes = _changed_facts(before, analysis)
 
     session["deferral_analysis"] = analysis
-    assistant_text = format_deferral_analysis_message(analysis)
+    session["ai_instruction_pending"] = False
+    assistant_text = (
+        format_deferral_conversation_message(analysis)
+        if initial
+        else _verified_ai_reply(analysis, interpretation, changes)
+    )
     session["messages"].append({"role": "assistant", "content": assistant_text})
-
     return {
         "message": assistant_text,
         "has_script": analysis.ready,
         "session_id": session_id,
     }
 
-
 def _execute_deferral(session: dict, output_path: Path) -> dict:
     analysis = session.get("deferral_analysis")
     if analysis is None:
         file_path = Path(session["file_path"])
-        analysis = analyze_deferral_workbook(file_path, intent_to_direction(session["intent"]))
+        analysis = analyze_deferral_workbook(file_path, intent_to_direction(session["intent"], file_path))
         session["deferral_analysis"] = analysis
     if not analysis.ready:
         missing = analysis.questions or ["The deferral migration is missing required facts."]
@@ -544,6 +891,7 @@ def _chat_open_ap(session_id: str, user_message: str) -> dict:
     session = _sessions[session_id]
     file_path = Path(session["file_path"])
     mode = session.get("open_ap_mode", "bills")
+    initial = not session["messages"]
 
     session["messages"].append({"role": "user", "content": user_message})
     analysis = session.get("open_ap_analysis")
@@ -551,28 +899,51 @@ def _chat_open_ap(session_id: str, user_message: str) -> dict:
         mode, analysis = _analyze_open_ap_auto(file_path)
         session["open_ap_mode"] = mode
 
-    # The initial API call supplies a long task instruction. Treat later
-    # messages as corrections/facts such as "entity is causaLens".
-    if len(session["messages"]) > 1:
+    try:
+        interpretation = interpret_intent_instruction(
+            intent=session["intent"],
+            user_message=user_message,
+            state=_analysis_state(analysis, mode=mode),
+            mode=mode,
+            initial=initial,
+        )
+    except AIInterpretationError:
+        session["ai_instruction_pending"] = True
+        assistant_text = _ai_failure_reply()
+        session["messages"].append({"role": "assistant", "content": assistant_text})
+        return {"message": assistant_text, "has_script": False, "session_id": session_id}
+
+    changes: dict[str, object] = {}
+    if not initial and interpretation.understood and not interpretation.clarification_question:
+        before = analysis
         if mode == "bills":
-            analysis = apply_user_message_to_bills_ap_analysis(analysis, user_message, file_path)
+            analysis = apply_structured_updates_to_bills_ap_analysis(
+                analysis, interpretation.updates, file_path
+            )
         else:
-            analysis = apply_user_message_to_open_ap_analysis(analysis, user_message, file_path)
+            analysis = apply_structured_updates_to_open_ap_analysis(
+                analysis, interpretation.updates, file_path
+            )
+        changes = _changed_facts(before, analysis)
 
     session["open_ap_analysis"] = analysis
-    assistant_text = (
+    session["ai_instruction_pending"] = False
+    initial_message = (
         format_bills_ap_analysis_message(analysis)
         if mode == "bills"
         else format_open_ap_analysis_message(analysis)
     )
+    assistant_text = (
+        initial_message
+        if initial
+        else _verified_ai_reply(analysis, interpretation, changes)
+    )
     session["messages"].append({"role": "assistant", "content": assistant_text})
-
     return {
         "message": assistant_text,
         "has_script": analysis.ready,
         "session_id": session_id,
     }
-
 
 def _execute_open_ap(session: dict, output_path: Path) -> dict:
     file_path = Path(session["file_path"])

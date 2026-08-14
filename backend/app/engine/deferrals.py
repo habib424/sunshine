@@ -42,6 +42,7 @@ LIGHT_JE_V2_COLUMNS = [
 
 
 DEFERRAL_INTENTS = {
+    "migrate_deferrals_to_light_je",
     "migrate_deferred_cost_to_light_je",
     "migrate_deferred_revenue_to_light_je",
 }
@@ -54,6 +55,7 @@ _DATE_IN_TEXT = re.compile(r"(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})")
 @dataclass
 class DeferralAnalysis:
     direction: Direction
+    source_sheets: list[dict[str, Any]] = field(default_factory=list)
     source_sheet: str | None = None
     header_row: int | None = None
     roles: dict[str, str] = field(default_factory=dict)
@@ -70,6 +72,11 @@ class DeferralAnalysis:
     @property
     def ready(self) -> bool:
         required_roles = {"amount", "description", "source_reference"}
+        sources_ready = (
+            all(required_roles.issubset(set(source.get("roles", {}))) for source in self.source_sheets)
+            if self.source_sheets
+            else required_roles.issubset(set(self.roles))
+        )
         required_facts = {"entity", "currency", "posting_date"}
         has_deferral_account = "deferral_account" in self.roles or "deferral_account" in self.facts
         has_release_account = "release_account" in self.roles or "release_account" in self.facts
@@ -79,7 +86,7 @@ class DeferralAnalysis:
             or "release_end_offset_years" in self.facts
         )
         return (
-            required_roles.issubset(set(self.roles))
+            sources_ready
             and required_facts.issubset(set(self.facts))
             and has_deferral_account
             and has_release_account
@@ -89,6 +96,7 @@ class DeferralAnalysis:
     def to_dict(self) -> dict[str, Any]:
         return {
             "direction": self.direction,
+            "source_sheets": self.source_sheets,
             "source_sheet": self.source_sheet,
             "header_row": self.header_row,
             "roles": self.roles,
@@ -108,8 +116,22 @@ class DeferralAnalysis:
         }
 
 
-def intent_to_direction(intent: str) -> Direction:
-    return "revenue" if "revenue" in intent else "cost"
+def intent_to_direction(intent: str, file_path: Path | None = None) -> Direction:
+    if "revenue" in intent:
+        return "revenue"
+    if "cost" in intent:
+        return "cost"
+    if file_path is not None:
+        try:
+            import openpyxl
+            workbook = openpyxl.load_workbook(file_path, read_only=True)
+            context = f"{file_path.stem} {' '.join(workbook.sheetnames)}".lower()
+            workbook.close()
+            if "revenue" in context or "income" in context:
+                return "revenue"
+        except Exception:
+            pass
+    return "cost"
 
 
 def analyze_deferral_workbook(file_path: Path, direction: Direction) -> DeferralAnalysis:
@@ -118,9 +140,11 @@ def analyze_deferral_workbook(file_path: Path, direction: Direction) -> Deferral
 
     analysis.target_example_sheet = _find_target_example_sheet(sheets)
     analysis.reference_sheet = _find_reference_sheet(sheets)
-    source_candidate = _find_source_sheet_and_roles(sheets, analysis.target_example_sheet, direction)
+    source_candidates = _find_source_sheets_and_roles(sheets, analysis.target_example_sheet, direction)
 
-    if source_candidate:
+    if source_candidates:
+        analysis.source_sheets = source_candidates
+        source_candidate = source_candidates[0]
         analysis.source_sheet = source_candidate["sheet"]
         analysis.header_row = source_candidate["header_row"]
         analysis.roles = source_candidate["roles"]
@@ -130,9 +154,9 @@ def analyze_deferral_workbook(file_path: Path, direction: Direction) -> Deferral
     else:
         analysis.questions.append("I could not identify the source schedule. Which sheet contains the deferred balances?")
 
-    analysis.facts.update(_infer_facts(sheets, analysis))
+    analysis.facts.update(_infer_facts(sheets, analysis, file_path))
     analysis.assumptions.extend(_infer_assumptions(analysis))
-    analysis.questions.extend(_missing_questions(analysis))
+    analysis.questions.extend(_conversation_questions(analysis))
     analysis.warnings.extend(_reference_warnings(file_path, analysis))
     return analysis
 
@@ -144,23 +168,37 @@ def apply_user_message_to_analysis(
 ) -> DeferralAnalysis:
     lower = message.lower()
 
-    if "revenue" in lower:
+    if re.search(r"\b(?:this|migration|direction)\s+(?:is|should be)\s+(?:deferred\s+)?(?:revenue|income)\b", lower) or re.search(r"\bswitch\s+to\s+(?:deferred\s+)?(?:revenue|income)\b", lower):
         analysis.direction = "revenue"
-    elif "cost" in lower or "prepayment" in lower or "prepaid" in lower:
+    elif re.search(r"\b(?:this|migration|direction)\s+(?:is|should be)\s+(?:deferred\s+)?(?:cost|prepayment|prepaid)\b", lower) or re.search(r"\bswitch\s+to\s+(?:deferred\s+)?(?:cost|prepayment|prepaid)\b", lower):
         analysis.direction = "cost"
 
     named_values = _parse_named_values(message)
+    named_values.update({
+        key: value for key, value in _parse_contextual_accounts(message).items()
+        if key not in named_values
+    })
 
-    posting_text = named_values.get("posting_date") or named_values.get("release_start_date")
-    posting_date = _parse_any_date(posting_text or message)
+    if not named_values.get("entity") and _looks_like_bare_entity_answer(message, analysis):
+        named_values["entity"] = message.strip().strip("`'\".,; ")
+
+    posting_text = named_values.get("posting_date")
+    if not posting_text and any("posting date" in question.lower() for question in analysis.questions):
+        posting_text = message
+    posting_date = _parse_any_date(posting_text) if posting_text else None
     if posting_date is not None:
         analysis.facts["posting_date"] = posting_date
-        if named_values.get("release_start_date"):
-            analysis.facts["release_start_date"] = posting_date
+
+    release_start_text = named_values.get("release_start_date")
+    release_start = _parse_any_date(release_start_text) if release_start_text else None
+    if release_start is not None:
+        analysis.facts["release_start_date"] = release_start
+        analysis.facts.setdefault("posting_date", release_start)
 
     currency = _parse_currency(message)
     if currency:
         analysis.facts["currency"] = currency
+        analysis.facts.pop("_currency_evidence", None)
 
     entity = named_values.get("entity")
     if entity:
@@ -195,7 +233,45 @@ def apply_user_message_to_analysis(
     refreshed = analyze_deferral_workbook(file_path, analysis.direction)
     refreshed.facts.update(analysis.facts)
     refreshed.assumptions = _infer_assumptions(refreshed)
-    refreshed.questions = _missing_questions(refreshed)
+    refreshed.questions = _conversation_questions(refreshed)
+    refreshed.warnings = _reference_warnings(file_path, refreshed)
+    return refreshed
+
+
+def apply_structured_updates_to_analysis(
+    analysis: DeferralAnalysis,
+    updates: dict[str, str],
+    file_path: Path,
+) -> DeferralAnalysis:
+    """Apply an already validated AI patch without reparsing natural language."""
+    direction = updates.get("direction", analysis.direction)
+    if direction not in ("cost", "revenue"):
+        raise ValueError("Invalid deferral direction")
+
+    facts = dict(analysis.facts)
+    for key, raw_value in updates.items():
+        if key == "direction":
+            continue
+        if key in {"posting_date", "release_start_date", "release_end_date"}:
+            facts[key] = datetime.fromisoformat(raw_value)
+        elif key == "release_end_offset_years":
+            facts[key] = int(raw_value)
+        else:
+            facts[key] = raw_value
+
+    if "release_start_date" in updates:
+        facts.setdefault("posting_date", facts["release_start_date"])
+    if "release_end_date" in updates:
+        facts.pop("release_end_offset_years", None)
+    if "release_end_offset_years" in updates:
+        facts.pop("release_end_date", None)
+    if "currency" in updates:
+        facts.pop("_currency_evidence", None)
+
+    refreshed = analyze_deferral_workbook(file_path, direction)
+    refreshed.facts.update(facts)
+    refreshed.assumptions = _infer_assumptions(refreshed)
+    refreshed.questions = _conversation_questions(refreshed)
     refreshed.warnings = _reference_warnings(file_path, refreshed)
     return refreshed
 
@@ -204,52 +280,67 @@ def transform_deferrals_to_light_je(file_path: Path, analysis: DeferralAnalysis)
     if not analysis.ready:
         missing = ", ".join(_missing_items(analysis))
         raise ValueError(f"Deferral migration is missing required information: {missing}")
-    if analysis.source_sheet is None or analysis.header_row is None:
-        raise ValueError("Deferral migration needs a source sheet and header row")
+    source_configs = analysis.source_sheets or ([{
+        "sheet": analysis.source_sheet,
+        "header_row": analysis.header_row,
+        "roles": analysis.roles,
+    }] if analysis.source_sheet is not None and analysis.header_row is not None else [])
+    if not source_configs:
+        raise ValueError("Deferral migration needs at least one source schedule")
 
-    source = pd.read_excel(
-        file_path,
-        sheet_name=analysis.source_sheet,
-        header=analysis.header_row,
-        engine="openpyxl",
-    )
-    rows = _valid_source_rows(source, analysis.roles)
+    normalized_parts: list[pd.DataFrame] = []
+    for source_config in source_configs:
+        source = pd.read_excel(
+            file_path,
+            sheet_name=source_config["sheet"],
+            header=source_config["header_row"],
+            engine="openpyxl",
+        )
+        source_rows = _valid_source_rows(source, source_config["roles"])
+        normalized = pd.DataFrame(index=source_rows.index)
+        for role, column in source_config["roles"].items():
+            if column in source_rows.columns:
+                normalized[role] = source_rows[column]
+        normalized["_source_sheet"] = source_config["sheet"]
+        normalized_parts.append(normalized)
+    rows = pd.concat(normalized_parts, ignore_index=True, sort=False)
+    roles = {column: column for column in rows.columns}
 
     account_codes = _read_account_codes(file_path, analysis.reference_sheet)
     deferral_mapper = (
-        _choose_account_mapper(rows[analysis.roles["deferral_account"]], account_codes)
-        if "deferral_account" in analysis.roles
+        _choose_account_mapper(rows["deferral_account"], account_codes)
+        if "deferral_account" in rows.columns
         else None
     )
     release_mapper = (
-        _choose_account_mapper(rows[analysis.roles["release_account"]], account_codes)
-        if "release_account" in analysis.roles
+        _choose_account_mapper(rows["release_account"], account_codes)
+        if "release_account" in rows.columns
         else None
     )
 
     output_rows: list[dict[str, Any]] = []
     for _, row in rows.iterrows():
-        amount = _to_float(row[analysis.roles["amount"]])
+        amount = _to_float(row["amount"])
         if amount is None or math.isclose(amount, 0.0, abs_tol=0.005):
             continue
 
-        description = _clean_text(row[analysis.roles["description"]])
-        source_reference = _clean_reference(row[analysis.roles["source_reference"]])
+        description = _clean_text(row["description"])
+        source_reference = _clean_reference(row["source_reference"])
         document_description = f"{analysis.facts.get('description_prefix', 'Data migration deferred ')}{description}"
         document_number = f"{document_description}{source_reference}"
 
         deferral_account = (
-            deferral_mapper(row[analysis.roles["deferral_account"]])
+            deferral_mapper(row["deferral_account"])
             if deferral_mapper is not None
             else _numeric_account(analysis.facts["deferral_account"])
         )
         release_account = (
-            release_mapper(row[analysis.roles["release_account"]])
+            release_mapper(row["release_account"])
             if release_mapper is not None
             else _numeric_account(analysis.facts["release_account"])
         )
         release_start = analysis.facts.get("release_start_date", analysis.facts["posting_date"])
-        release_end = _release_end_date(row, analysis, release_start)
+        release_end = _release_end_date(row, analysis, release_start, roles)
 
         common = {
             "Entity": analysis.facts["entity"],
@@ -264,7 +355,7 @@ def transform_deferrals_to_light_je(file_path: Path, analysis: DeferralAnalysis)
             "Departments (line)": None,
         }
 
-        release_template = _release_template(row, analysis, len(output_rows) // 2 + 1)
+        release_template = _release_template(row, analysis, len(output_rows) // 2 + 1, roles)
 
         if analysis.direction == "cost":
             output_rows.append({
@@ -311,7 +402,7 @@ def transform_deferrals_to_light_je(file_path: Path, analysis: DeferralAnalysis)
             [None if pd.isna(value) else value for value in df[column]],
             dtype=object,
         )
-    _validate_output(df, rows, analysis, account_codes)
+    _validate_output(df, rows, analysis, account_codes, source_amount_column="amount")
     return df
 
 
@@ -375,6 +466,87 @@ def format_deferral_analysis_message(analysis: DeferralAnalysis) -> str:
     return "\n".join(lines)
 
 
+def format_deferral_conversation_message(
+    analysis: DeferralAnalysis,
+    changes: dict[str, Any] | None = None,
+    understood: bool = True,
+) -> str:
+    """Render a concise acknowledgement instead of repeating internal state."""
+    labels = {
+        "entity": "Entity",
+        "currency": "Currency",
+        "posting_date": "Posting date",
+        "release_start_date": "Release start",
+        "release_end_date": "Release end",
+        "release_end_offset_years": "Release end rule",
+        "release_template": "Release template",
+        "deferral_account": "Deferred balance account",
+        "release_account": "Revenue / expense account",
+        "description_prefix": "Description prefix",
+        "direction": "Migration type",
+    }
+    title = "deferred income" if analysis.direction == "revenue" else "prepaid expenses"
+    labels["deferral_account"] = (
+        "Deferred-income liability account" if analysis.direction == "revenue" else "Prepaid-expense asset account"
+    )
+    labels["release_account"] = "Revenue account" if analysis.direction == "revenue" else "Expense account"
+    lines: list[str] = []
+
+    if changes is None:
+        lines.append(f"I recognized this as a {title} migration.")
+    elif changes:
+        lines.append("Got it. I updated the migration plan:")
+        for key, value in changes.items():
+            if key.startswith("_"):
+                continue
+            display = (
+                "1 year after the release start"
+                if key == "release_end_offset_years" and value == 1
+                else _serialise_fact(value)
+            )
+            lines.append(f"- {labels.get(key, key.replace('_', ' ').title())}: {display}")
+    elif understood:
+        lines.append("Got it. That is already reflected in the migration plan.")
+    else:
+        lines.append("I couldn't apply that instruction confidently, so I left the plan unchanged.")
+
+    if analysis.source_sheets:
+        lines.append("")
+        if len(analysis.source_sheets) == 1:
+            source = analysis.source_sheets[0]
+            lines.append(f"I found {source.get('valid_rows', analysis.valid_source_rows)} balances in {source['sheet']}.")
+        else:
+            lines.append(
+                f"I found {analysis.valid_source_rows} balances across "
+                f"{len(analysis.source_sheets)} schedules and will include both:"
+            )
+            for source in analysis.source_sheets:
+                row_count = source.get("valid_rows", 0)
+                lines.append(f"- {source['sheet']}: {row_count} {'balance' if row_count == 1 else 'balances'}")
+    elif not analysis.source_sheet:
+        lines.extend(["", "I could not identify a usable deferred-balance schedule yet."])
+
+    if changes is None and analysis.facts.get("currency"):
+        lines.append("")
+        evidence = analysis.facts.get("_currency_evidence")
+        suffix = f" (inferred from {evidence})" if evidence else ""
+        lines.append(f"Currency: {analysis.facts['currency']}{suffix}")
+
+    if analysis.questions:
+        lines.extend(["", "I still need:"])
+        lines.extend(f"- {question}" for question in analysis.questions)
+        lines.extend(["", "Answer naturally in one message; you do not need special field names."])
+    else:
+        lines.extend([
+            "",
+            "Everything required is set. You can run the migration, or tell me any correction in your own words.",
+        ])
+
+    if analysis.warnings:
+        lines.extend(["", "Note: " + " ".join(analysis.warnings)])
+    return "\n".join(lines)
+
+
 def _find_target_example_sheet(sheets: dict[str, pd.DataFrame]) -> str | None:
     target_terms = {"entity", "document number", "currency", "posting date", "account", "debit", "credit"}
     for name, df in sheets.items():
@@ -396,11 +568,11 @@ def _find_reference_sheet(sheets: dict[str, pd.DataFrame]) -> str | None:
     return None
 
 
-def _find_source_sheet_and_roles(
+def _find_source_sheets_and_roles(
     sheets: dict[str, pd.DataFrame],
     target_example_sheet: str | None,
     direction: Direction,
-) -> dict[str, Any] | None:
+) -> list[dict[str, Any]]:
     candidates = []
     for sheet_name, df in sheets.items():
         if sheet_name == target_example_sheet:
@@ -422,8 +594,21 @@ def _find_source_sheet_and_roles(
             })
 
     if not candidates:
-        return None
-    return max(candidates, key=lambda c: c["confidence"])
+        return []
+
+    best_by_sheet: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        current = best_by_sheet.get(candidate["sheet"])
+        if current is None or candidate["confidence"] > current["confidence"]:
+            best_by_sheet[candidate["sheet"]] = candidate
+
+    ranked = sorted(best_by_sheet.values(), key=lambda c: c["confidence"], reverse=True)
+    core_roles = {"amount", "description", "source_reference"}
+    compatible = [
+        candidate for candidate in ranked
+        if core_roles.issubset(set(candidate["roles"]))
+    ]
+    return compatible or ranked[:1]
 
 
 def _roles_for_header_row(values: list[Any], direction: Direction) -> tuple[dict[str, str], dict[str, float]]:
@@ -529,7 +714,11 @@ def _data_below_score(df: pd.DataFrame, row_idx: int) -> float:
     return float(mask.values.mean())
 
 
-def _infer_facts(sheets: dict[str, pd.DataFrame], analysis: DeferralAnalysis) -> dict[str, Any]:
+def _infer_facts(
+    sheets: dict[str, pd.DataFrame],
+    analysis: DeferralAnalysis,
+    file_path: Path,
+) -> dict[str, Any]:
     facts: dict[str, Any] = {"ledger": "Primary"}
 
     if analysis.source_sheet:
@@ -556,9 +745,25 @@ def _infer_facts(sheets: dict[str, pd.DataFrame], analysis: DeferralAnalysis) ->
             if len(entity_values) == 1:
                 facts.setdefault("entity", entity_values[0])
 
-    # Practical default for the Onomondo workbook and many EU migrations. The
-    # assistant surfaces this as an assumption so the user can correct it.
-    facts.setdefault("currency", "DKK")
+    if "currency" not in facts:
+        sample_values = " ".join(
+            str(value)
+            for frame in sheets.values()
+            for value in frame.iloc[:10].values.flatten()
+            if pd.notna(value)
+        )
+        context = f"{file_path.stem} {' '.join(sheets.keys())} {sample_values}".lower()
+        currency_hints = (
+            (r"\buk\b|united kingdom", "GBP", "a UK marker in the workbook"),
+            (r"\bdenmark\b|\bdk\b", "DKK", "Denmark in the workbook name"),
+            (r"\bsweden\b|\bse\b", "SEK", "Sweden in the workbook name"),
+            (r"\bnorway\b|\bno\b", "NOK", "Norway in the workbook name"),
+        )
+        for pattern, currency, evidence in currency_hints:
+            if re.search(pattern, context):
+                facts["currency"] = currency
+                facts["_currency_evidence"] = evidence
+                break
     facts.setdefault("description_prefix", "Data migration deferred ")
     return facts
 
@@ -582,8 +787,8 @@ def _infer_from_source_banner(df: pd.DataFrame) -> dict[str, Any]:
 
 def _infer_assumptions(analysis: DeferralAnalysis) -> list[str]:
     assumptions = []
-    if analysis.facts.get("currency") == "DKK" and "currency" not in analysis.roles:
-        assumptions.append("Currency was not found in the source, so I defaulted it to DKK. Tell me if this should be another currency.")
+    if analysis.facts.get("_currency_evidence"):
+        assumptions.append(f"Currency {analysis.facts['currency']} was inferred from {analysis.facts['_currency_evidence']}; you can correct it.")
     if analysis.facts.get("ledger") == "Primary":
         assumptions.append("Ledger is set to Primary.")
     if analysis.facts.get("description_prefix") == "Data migration deferred ":
@@ -614,6 +819,42 @@ def _missing_questions(analysis: DeferralAnalysis) -> list[str]:
     for fact in ("entity", "currency", "posting_date"):
         if fact not in analysis.facts:
             questions.append(f"Provide `{fact}`.")
+    return questions
+
+
+def _conversation_questions(analysis: DeferralAnalysis) -> list[str]:
+    """Describe only execution blockers, using accounting language."""
+    questions: list[str] = []
+    missing = set(_missing_items(analysis, role_only=True))
+
+    source_labels = {
+        "amount": "opening balance",
+        "description": "customer or description",
+        "source_reference": "invoice or source reference",
+    }
+    missing_source = [source_labels[key] for key in source_labels if key in missing]
+    if missing_source:
+        questions.append("Which columns contain " + ", ".join(missing_source) + "?")
+
+    needs_deferral = "deferral_account" in missing
+    needs_release = "release_account" in missing
+    if needs_deferral and needs_release:
+        balance_label = "deferred-income liability" if analysis.direction == "revenue" else "prepaid-expense asset"
+        pnl_label = "revenue" if analysis.direction == "revenue" else "expense"
+        questions.append(f"Which Light {balance_label} account and {pnl_label} account should I use?")
+    elif needs_deferral:
+        questions.append("Which Light balance-sheet account should hold the deferred balance?")
+    elif needs_release:
+        questions.append("Which Light revenue or expense account should receive the releases?")
+
+    if "release_end_date" in missing:
+        questions.append("When should the release end (a date or a rule such as one year after the start)?")
+    if "entity" not in analysis.facts:
+        questions.append("Which Light entity should I post to?")
+    if "currency" not in analysis.facts:
+        questions.append("Which currency should I use?")
+    if "posting_date" not in analysis.facts:
+        questions.append("What posting date should I use?")
     return questions
 
 
@@ -675,6 +916,19 @@ def _valid_source_rows(source: pd.DataFrame, roles: dict[str, str]) -> pd.DataFr
 
 def _count_valid_rows(file_path: Path, analysis: DeferralAnalysis) -> int:
     try:
+        if analysis.source_sheets:
+            total = 0
+            for source_config in analysis.source_sheets:
+                source = pd.read_excel(
+                    file_path,
+                    sheet_name=source_config["sheet"],
+                    header=source_config["header_row"],
+                    engine="openpyxl",
+                )
+                valid_rows = len(_valid_source_rows(source, source_config["roles"]))
+                source_config["valid_rows"] = valid_rows
+                total += valid_rows
+            return total
         if not analysis.source_sheet or analysis.header_row is None:
             return 0
         source = pd.read_excel(file_path, sheet_name=analysis.source_sheet, header=analysis.header_row, engine="openpyxl")
@@ -721,43 +975,56 @@ def _numeric_account(value: Any, multiplier: int = 1) -> int | None:
     return int(number) * multiplier
 
 
-def _release_template(row: pd.Series, analysis: DeferralAnalysis, sequence: int) -> str | None:
-    if "release_template" in analysis.roles:
-        value = row.get(analysis.roles["release_template"])
+def _release_template(
+    row: pd.Series,
+    analysis: DeferralAnalysis,
+    sequence: int,
+    roles: dict[str, str] | None = None,
+) -> str | None:
+    active_roles = roles or analysis.roles
+    if "release_template" in active_roles:
+        value = row.get(active_roles["release_template"])
         if pd.notna(value) and str(value).strip():
             return str(value).strip()
     if analysis.facts.get("release_template"):
         return str(analysis.facts["release_template"])
 
     label = "Deferred Revenue" if analysis.direction == "revenue" else "Prepayment (AP)"
-    months = _period_months(row, analysis)
+    months = _period_months(row, analysis, active_roles)
     if months is not None:
         return f"{months} Months - {label}"
     return f"{sequence} Months - {label}"
 
 
-def _period_months(row: pd.Series, analysis: DeferralAnalysis) -> int | None:
+def _period_months(row: pd.Series, analysis: DeferralAnalysis, roles: dict[str, str] | None = None) -> int | None:
     start = None
-    if "release_start_date" in analysis.roles:
-        start = _to_datetime(row[analysis.roles["release_start_date"]])
+    active_roles = roles or analysis.roles
+    if "release_start_date" in active_roles:
+        start = _to_datetime(row[active_roles["release_start_date"]])
     if start is None:
         start = analysis.facts.get("release_start_date")
     if start is None:
         start = analysis.facts.get("posting_date")
-    end = _release_end_date(row, analysis, start)
+    end = _release_end_date(row, analysis, start, active_roles)
     if start is None or end is None:
         return None
     months = (end.year - start.year) * 12 + (end.month - start.month) + 1
     return max(months, 1)
 
 
-def _validate_output(df: pd.DataFrame, source_rows: pd.DataFrame, analysis: DeferralAnalysis, account_codes: set[int]) -> None:
+def _validate_output(
+    df: pd.DataFrame,
+    source_rows: pd.DataFrame,
+    analysis: DeferralAnalysis,
+    account_codes: set[int],
+    source_amount_column: str | None = None,
+) -> None:
     debit = pd.to_numeric(df["Debit"], errors="coerce").fillna(0).sum()
     credit = pd.to_numeric(df["Credit"], errors="coerce").fillna(0).sum()
     if not math.isclose(debit, credit, abs_tol=0.01):
         raise ValueError(f"Generated JE is not balanced: debit={debit:.2f}, credit={credit:.2f}")
 
-    source_total = source_rows[analysis.roles["amount"]].apply(_to_float).dropna().sum()
+    source_total = source_rows[source_amount_column or analysis.roles["amount"]].apply(_to_float).dropna().sum()
     if not math.isclose(debit, source_total, abs_tol=0.01):
         raise ValueError(f"Generated total {debit:.2f} does not match source amount total {source_total:.2f}")
 
@@ -862,8 +1129,14 @@ def _parse_currency(message: str) -> str | None:
 _MESSAGE_FIELD_ALIASES = {
     "release_template": ("release template", "template"),
     "description_prefix": ("description prefix", "prefix"),
-    "deferral_account": ("deferral account", "liability account"),
-    "release_account": ("release account", "revenue account", "income account"),
+    "deferral_account": (
+        "deferral account",
+        "liability account",
+        "balance sheet account",
+        "deferred income account",
+        "prepaid account",
+    ),
+    "release_account": ("release account", "revenue account", "income account", "expense account"),
     "release_start_date": ("release start date", "starting date", "start date"),
     "release_end_date": ("release end date", "ending date", "end date"),
     "posting_date": ("posting date",),
@@ -898,6 +1171,47 @@ def _parse_named_values(message: str) -> dict[str, str]:
     return values
 
 
+def _parse_contextual_accounts(message: str) -> dict[str, str]:
+    """Understand account codes placed before or after plain-English labels."""
+    contexts = {
+        "deferral_account": r"balance\s*sheet|liabilit(?:y|ies)|deferred\s+(?:income|revenue)|prepaid|prepayment",
+        "release_account": r"revenue|income|sales|expense|p\s*&\s*l|profit\s+and\s+loss",
+    }
+    values: dict[str, str] = {}
+    for field, context in contexts.items():
+        patterns = (
+            rf"\b(\d{{3,10}})\b\D{{0,24}}(?:for|as|to)?\s*(?:the\s+)?(?:{context})(?:\s+account)?",
+            rf"(?:{context})(?:\s+account)?\D{{0,30}}\b(\d{{3,10}})\b",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, message, re.IGNORECASE)
+            if match:
+                values[field] = match.group(1)
+                break
+    return values
+
+
+def _looks_like_bare_entity_answer(message: str, analysis: DeferralAnalysis) -> bool:
+    if not any("which light entity" in question.lower() for question in analysis.questions):
+        return False
+    text = message.strip().strip("`'\".,; ")
+    if not text or len(text.split()) > 6 or re.search(r"\d", text):
+        return False
+    if _parse_currency(text) or _parse_any_date(text) is not None:
+        return False
+    disallowed = (
+        "account",
+        "currency",
+        "date",
+        "template",
+        "year",
+        "month",
+        "same as",
+        "include",
+        "exclude",
+    )
+    return not any(term in text.lower() for term in disallowed)
+
 def _parse_year_offset(text: str) -> int | None:
     match = re.search(r"(?:\+|plus|after|add(?:ing)?)\s*(\d+)\s*years?\b", text, re.IGNORECASE)
     if not match and re.search(r"\b(?:one|a)\s+year\b", text, re.IGNORECASE):
@@ -916,9 +1230,11 @@ def _release_end_date(
     row: pd.Series,
     analysis: DeferralAnalysis,
     release_start: datetime | None,
+    roles: dict[str, str] | None = None,
 ) -> datetime | None:
-    if "release_end_date" in analysis.roles:
-        return _to_datetime(row[analysis.roles["release_end_date"]])
+    active_roles = roles or analysis.roles
+    if "release_end_date" in active_roles:
+        return _to_datetime(row[active_roles["release_end_date"]])
     if analysis.facts.get("release_end_date"):
         return _to_datetime(analysis.facts["release_end_date"])
     offset_years = analysis.facts.get("release_end_offset_years")

@@ -98,6 +98,43 @@ TARGET_SCHEMAS = {
             "Amortization End Date",
         ],
     },
+    "light_invoices_ar_upload": {
+        "description": (
+            "Light Invoices (AR) upload format — one open customer invoice per "
+            "outstanding AR balance, with a single product line per invoice"
+        ),
+        "columns": [
+            "Entity",
+            "Invoice Status",
+            "Customer",
+            "Customer ID",
+            "Invoice Number",
+            "Invoice Date",
+            "Due Date",
+            "Currency",
+            "Payment Type",
+            "Payment To",
+            "Invoice Template",
+            "Net Terms",
+            "PO Number",
+            "Description",
+            "Gross/Net",
+            "Invoice Currency Amount",
+            "Local Currency Amount",
+            "Product",
+            "Quantity",
+            "Unit Price",
+            "Product Name Override",
+            "Tax Code",
+            "Account",
+            "Tax Amount Override",
+            "Billing Start",
+            "Billing End",
+            "Accrual Template",
+            "Accrual Start Date",
+            "Accrual End Date",
+        ],
+    },
     "light_fx_adjustment": {
         "description": "Light JE upload for FX currency adjustments with FX rate override",
         "columns": [

@@ -11,6 +11,7 @@ from app.config import settings
 from app.db.session import get_db
 from app.engine.deferrals import DEFERRAL_INTENTS
 from app.engine.fx_adjustment import FX_ADJUSTMENT_INTENTS
+from app.engine.invoices_ar import OPEN_AR_INTENTS
 from app.engine.open_ap import OPEN_AP_INTENTS
 from app.models.job import TransformationJob
 from app.models.upload import UploadedFile
@@ -68,6 +69,7 @@ def _build_layout_context(file_path: Path, intent: str) -> str:
         intent == "reconcile_je_to_gl"
         or intent in DEFERRAL_INTENTS
         or intent in OPEN_AP_INTENTS
+        or intent in OPEN_AR_INTENTS
         or intent in FX_ADJUSTMENT_INTENTS
     ):
         return ""  # These paths use their own multi-sheet analysis.
@@ -139,7 +141,11 @@ def _intent_instruction(intent: str) -> str:
             "The output should be a reconciliation report DataFrame."
         )
     elif intent in DEFERRAL_INTENTS:
-        direction = "deferred revenue" if "revenue" in intent else "deferred cost / prepayment"
+        direction = (
+            "deferred balances"
+            if intent == "migrate_deferrals_to_light_je"
+            else "deferred revenue" if "revenue" in intent else "deferred cost / prepayment"
+        )
         return (
             f"My intent is to MIGRATE {direction} balances into the Light JE upload format.\n\n"
             "Use the target Light JE layout as the destination, identify the source schedule and any reference extracts, "
@@ -153,6 +159,16 @@ def _intent_instruction(intent: str) -> str:
             "outstanding invoices, reuse Light Posting reference lines when the workbook "
             "carries them, ask only for missing facts, and execute using deterministic "
             "rules once the required facts are available."
+        )
+    elif intent in OPEN_AR_INTENTS:
+        return (
+            "My intent is to UPLOAD open accounts receivable into Light.\n\n"
+            "Identify the AR source (flat ledger or aging detail report), exclude section "
+            "headers, per-customer subtotals and grand totals, net customer payments and "
+            "credit memos against outstanding invoices, take facts from a filled-in "
+            "Invoices (AR) template sheet when the workbook carries one, ask only for "
+            "missing facts, and execute using deterministic rules once the required facts "
+            "are available."
         )
     elif intent in FX_ADJUSTMENT_INTENTS:
         return (

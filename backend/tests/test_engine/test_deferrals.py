@@ -1,11 +1,17 @@
 from datetime import datetime
 
+import pandas as pd
+
 from app.engine.deferrals import (
     DeferralAnalysis,
     _add_years,
     _parse_named_values,
     _parse_year_offset,
     _roles_for_header_row,
+    analyze_deferral_workbook,
+    apply_user_message_to_analysis,
+    intent_to_direction,
+    transform_deferrals_to_light_je,
 )
 
 
@@ -61,3 +67,54 @@ def test_constant_accounts_and_relative_end_date_can_make_analysis_ready():
     assert analysis.ready
     assert _add_years(datetime(2024, 2, 29), 1) == datetime(2025, 2, 28)
 
+def test_conversation_combines_schedules_and_stops_asking_answered_questions(tmp_path):
+    workbook_path = tmp_path / "Deferred Income UK.xlsx"
+    columns = ["Date", "Region", "Customer", "INV Number", "b/fwd", datetime(2026, 8, 1)]
+    main = pd.DataFrame(
+        [[datetime(2026, 1, 1), "UK", "Customer A", "INV-1", 100.0, -10.0]],
+        columns=columns,
+    )
+    professional_services = pd.DataFrame(
+        [[datetime(2026, 2, 1), "UK", "Customer B", "INV-2", 50.0, -5.0]],
+        columns=columns,
+    )
+    with pd.ExcelWriter(workbook_path, engine="openpyxl") as writer:
+        main.to_excel(writer, sheet_name="Deferred Revenue", index=False)
+        professional_services.to_excel(writer, sheet_name="Deferred Revenue - PS", index=False)
+
+    direction = intent_to_direction("migrate_deferrals_to_light_je", workbook_path)
+    analysis = analyze_deferral_workbook(workbook_path, direction)
+    assert direction == "revenue"
+    assert [source["sheet"] for source in analysis.source_sheets] == [
+        "Deferred Revenue",
+        "Deferred Revenue - PS",
+    ]
+    assert analysis.valid_source_rows == 2
+    assert analysis.facts["currency"] == "GBP"
+
+    analysis = apply_user_message_to_analysis(
+        analysis,
+        "currency is GBP template is Deferred Revenue starting date is as of "
+        "01-08-2026 entity causalens, ending date is the start + 1 year",
+        workbook_path,
+    )
+    assert analysis.facts["entity"] == "causalens"
+    assert analysis.facts["release_end_offset_years"] == 1
+    assert analysis.questions == [
+        "Which Light deferred-income liability account and revenue account should I use?"
+    ]
+
+    analysis = apply_user_message_to_analysis(
+        analysis,
+        "Use 2200 for the balance sheet and 4000 for income",
+        workbook_path,
+    )
+    assert analysis.ready
+    assert analysis.questions == []
+    assert analysis.facts["deferral_account"] == 2200
+    assert analysis.facts["release_account"] == 4000
+
+    output = transform_deferrals_to_light_je(workbook_path, analysis)
+    assert len(output) == 4
+    assert output["Document Number"].nunique() == 2
+    assert output["Debit"].fillna(0).sum() == output["Credit"].fillna(0).sum() == 150.0

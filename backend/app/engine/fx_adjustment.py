@@ -218,6 +218,32 @@ def apply_user_message_to_analysis(
     return refreshed
 
 
+def apply_structured_updates_to_analysis(
+    analysis: FXAdjustmentAnalysis,
+    updates: dict[str, str],
+    file_path: Path,
+) -> FXAdjustmentAnalysis:
+    """Apply an already validated AI patch without reparsing natural language."""
+    allowed = {
+        "entity",
+        "ledger",
+        "local_currency",
+        "posting_date",
+        "document_year",
+        "clearing_account",
+    }
+    unknown = set(updates) - allowed
+    if unknown:
+        raise ValueError(f"Unsupported FX updates: {sorted(unknown)}")
+
+    facts = dict(analysis.facts)
+    facts.update(updates)
+    refreshed = analyze_fx_workbook(file_path)
+    refreshed.facts.update({key: value for key, value in facts.items() if value not in (None, "")})
+    _finalise(refreshed)
+    return refreshed
+
+
 def format_fx_analysis_message(analysis: FXAdjustmentAnalysis) -> str:
     lines = ["I found an FX currency adjustment layout."]
 

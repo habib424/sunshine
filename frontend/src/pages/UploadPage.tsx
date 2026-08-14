@@ -4,7 +4,7 @@ import IntentAnalysis from "../components/upload/IntentAnalysis";
 import TransformChat from "../components/chat/TransformChat";
 import { uploadFiles, startChat, getExportUrl, getIntents } from "../api/client";
 import { useAppStore } from "../stores/appStore";
-import { Target, FileSearch, GitCompare, Loader2, CalendarClock, ReceiptText, ArrowLeftRight } from "lucide-react";
+import { Target, FileSearch, GitCompare, Loader2, CalendarClock, Receipt, ReceiptText, ArrowLeftRight } from "lucide-react";
 
 type Step = "upload" | "intent" | "starting" | "analyze" | "chat" | "done";
 
@@ -13,8 +13,10 @@ const INTENT_ICONS: Record<string, typeof Target> = {
   validate_je: FileSearch,
   reconcile_je_to_gl: GitCompare,
   migrate_deferred_cost_to_light_je: CalendarClock,
+  migrate_deferrals_to_light_je: CalendarClock,
   migrate_deferred_revenue_to_light_je: ReceiptText,
   upload_open_ap_to_light_ap: ReceiptText,
+  upload_open_ar_to_light_ar: Receipt,
   fx_currency_adjustment: ArrowLeftRight,
 };
 
@@ -70,26 +72,20 @@ export default function UploadPage() {
     if (!uploadId) return;
     setSelectedIntent(intent);
     setError(null);
-
-    if (intent === "validate_je") {
-      // Validation uses the deterministic analysis — no AI chat needed
-      setStep("analyze");
-    } else {
-      // Convert / reconcile go through the AI chat with detector grounding
-      setStep("starting");
-      try {
-        const chatResult = await startChat(uploadId, intent);
-        setSessionId(chatResult.session_id);
-        setInitialMessage(chatResult.message);
-        setInitialHasScript(chatResult.has_script || false);
-        setStep("chat");
-      } catch (e: any) {
-        setError(e.message || "Failed to start session");
-        setStep("intent");
-      }
+    setStep("starting");
+    try {
+      // Every intent, including validation, starts an AI conversation.
+      // Deterministic engines still own validation and accounting execution.
+      const chatResult = await startChat(uploadId, intent);
+      setSessionId(chatResult.session_id);
+      setInitialMessage(chatResult.message);
+      setInitialHasScript(chatResult.has_script || false);
+      setStep("chat");
+    } catch (e: any) {
+      setError(e.message || "Failed to start session");
+      setStep("intent");
     }
   };
-
   const handleProceedToChat = async () => {
     if (!uploadId || !selectedIntent) return;
     setStep("starting");
@@ -115,6 +111,8 @@ export default function UploadPage() {
     setStep("upload");
     setSessionId(null);
     setInitialMessage("");
+    setInitialHasScript(false);
+    setIntents([]);
     setUploadedName("");
     setUploadId(null);
     setSelectedIntent(null);
@@ -122,10 +120,18 @@ export default function UploadPage() {
     setError(null);
   };
 
-  const VISIBLE_STEPS: Step[] = selectedIntent === "validate_je"
-    ? ["upload", "intent", "analyze", "done"]
-    : ["upload", "intent", "chat", "done"];
-  const STEP_LABELS: Record<Step, string> = {
+  const handleChangeTask = () => {
+    setStep("intent");
+    setSessionId(null);
+    setInitialMessage("");
+    setInitialHasScript(false);
+    setIntents([]);
+    setSelectedIntent(null);
+    setJobId(null);
+    setError(null);
+  };
+
+  const VISIBLE_STEPS: Step[] = ["upload", "intent", "chat", "done"];  const STEP_LABELS: Record<Step, string> = {
     upload: "Upload",
     intent: "Intent",
     starting: "Preparing",
@@ -138,11 +144,11 @@ export default function UploadPage() {
     <div className={step === "chat" ? "max-w-4xl" : "max-w-3xl"}>
       <div className="flex items-center justify-between mb-2">
         <h1 className="text-2xl font-bold text-gray-900">
-          {step === "intent" ? "What do you need?" : step === "analyze" ? "Validation Report" : step === "chat" ? (selectedIntent === "reconcile_je_to_gl" ? "Reconciliation" : "Configure Migration") : "Upload & Migrate"}
+          {step === "intent" ? "What do you need?" : step === "analyze" ? "Validation Report" : step === "chat" ? (selectedIntent === "validate_je" ? "Validate File" : selectedIntent === "reconcile_je_to_gl" ? "Reconciliation" : "Configure Migration") : "Upload & Migrate"}
         </h1>
         {(step === "chat" || step === "intent" || step === "analyze") && (
-          <button onClick={handleReset} className="px-3 py-1.5 text-xs text-gray-500 border border-gray-300 rounded-lg hover:bg-gray-50">
-            Start over
+          <button onClick={handleChangeTask} className="px-3 py-1.5 text-xs text-gray-500 border border-gray-300 rounded-lg hover:bg-gray-50">
+            Change task
           </button>
         )}
       </div>

@@ -13,6 +13,7 @@ import app.engine.validators  # noqa: F401
 import app.engine.file_transforms.tb_opening_balance  # noqa: F401
 import app.engine.open_ap  # noqa: F401
 import app.engine.bills_ap  # noqa: F401
+import app.engine.invoices_ar  # noqa: F401
 import app.engine.rules.source_mapping  # noqa: F401
 import app.engine.rules.unpivot_entities  # noqa: F401
 import app.engine.rules.currency_lookup  # noqa: F401

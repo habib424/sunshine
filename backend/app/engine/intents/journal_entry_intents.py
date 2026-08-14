@@ -63,8 +63,25 @@ JE_INTENTS: dict[str, dict] = {
             {"type": "count", "field": "rows"},
         ],
     },
+    "migrate_deferrals_to_light_je": {
+        "label": "Migrate deferred balances to Light JE",
+        "description": (
+            "Read deferred-income or prepaid-expense schedules, infer the "
+            "accounting direction from the workbook, and prepare the Light "
+            "journal entry upload across all compatible schedules."
+        ),
+        "contract": "journal_entry",
+        "action": "convert",
+        "output_schema": "light_journal_entry_v2",
+        "requires_post_validation": False,
+        "conserve": [
+            {"type": "sum", "field": "amount", "tolerance": 0.01},
+        ],
+    },
+
     "migrate_deferred_cost_to_light_je": {
         "label": "Migrate deferred costs / prepayments to Light JE",
+        "hidden": True,
         "description": (
             "Read a deferred cost or prepayment schedule in whatever source "
             "layout is provided, identify the accounting facts needed, and "
@@ -80,6 +97,7 @@ JE_INTENTS: dict[str, dict] = {
     },
     "migrate_deferred_revenue_to_light_je": {
         "label": "Migrate deferred revenue to Light JE",
+        "hidden": True,
         "description": (
             "Read a deferred revenue schedule in whatever source layout is "
             "provided, identify the accounting facts needed, and produce the "
@@ -121,6 +139,22 @@ JE_INTENTS: dict[str, dict] = {
         "contract": "journal_entry",
         "action": "convert",
         "output_schema": "light_bills_ap_upload",
+        "requires_post_validation": False,
+        "conserve": [
+            {"type": "sum", "field": "amount", "tolerance": 0.01},
+        ],
+    },
+    "upload_open_ar_to_light_ar": {
+        "label": "Upload open AR to Light",
+        "description": (
+            "Read an open accounts receivable export or A/R aging report and "
+            "produce the Light Invoices (AR) upload: one open customer invoice "
+            "per outstanding balance, with payments and credit memos netted "
+            "per customer."
+        ),
+        "contract": "journal_entry",
+        "action": "convert",
+        "output_schema": "light_invoices_ar_upload",
         "requires_post_validation": False,
         "conserve": [
             {"type": "sum", "field": "amount", "tolerance": 0.01},
