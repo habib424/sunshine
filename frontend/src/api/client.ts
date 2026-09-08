@@ -1,5 +1,15 @@
 const BASE_URL = "/api";
 
+// AuthGate listens for this to flip back to the sign-in screen when a
+// session expires mid-use.
+export const UNAUTHORIZED_EVENT = "sunshine:unauthorized";
+
+function notifyUnauthorized(res: Response) {
+  if (res.status === 401) {
+    window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+  }
+}
+
 async function request<T>(
   path: string,
   options?: RequestInit
@@ -9,6 +19,7 @@ async function request<T>(
     ...options,
   });
   if (!res.ok) {
+    notifyUnauthorized(res);
     const error = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(error.detail || `Request failed: ${res.status}`);
   }
@@ -23,10 +34,44 @@ export async function uploadFiles(files: File[]) {
     body: formData,
   });
   if (!res.ok) {
+    notifyUnauthorized(res);
     const error = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(error.detail || "Upload failed");
   }
   return res.json();
+}
+
+// --- Auth ---
+
+export interface AuthConfig {
+  auth_required: boolean;
+  client_id: string;
+  allowed_domain: string;
+}
+
+export interface AuthUser {
+  email: string;
+  name: string;
+  picture: string;
+}
+
+export function getAuthConfig(): Promise<AuthConfig> {
+  return request("/auth/config");
+}
+
+export function getMe(): Promise<AuthUser> {
+  return request("/auth/me");
+}
+
+export function loginWithGoogle(credential: string): Promise<AuthUser> {
+  return request("/auth/google", {
+    method: "POST",
+    body: JSON.stringify({ credential }),
+  });
+}
+
+export function logout(): Promise<{ status: string }> {
+  return request("/auth/logout", { method: "POST" });
 }
 
 export async function getUploads() {

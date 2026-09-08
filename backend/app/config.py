@@ -30,6 +30,17 @@ class Settings(BaseSettings):
     max_upload_size_mb: int = 50
     preview_row_limit: int = 20
 
+    # Google sign-in. Auth is enforced only when a client ID is configured,
+    # so local development stays open by default.
+    google_client_id: str = ""
+    auth_allowed_domain: str = "light.inc"
+    auth_secret_key: str = ""
+    session_https_only: bool = False
+
+    @property
+    def auth_required(self) -> bool:
+        return bool(self.google_client_id)
+
     model_config = {"env_file": str(PROJECT_ROOT / ".env"), "env_file_encoding": "utf-8"}
 
     @property

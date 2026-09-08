@@ -19,11 +19,15 @@ venv/
 env/
 .Python
 
+# Local scratch
+tmp/
+
 # Storage / runtime data
 backend/storage/uploads/
 backend/storage/outputs/
 backend/storage/temp/
 backend/storage/sunshine.db
+backend/storage/layouts.json
 
 # Learned runtime state (layouts, resolutions). Source of truth is
 # per-installation; not committed to the repo.

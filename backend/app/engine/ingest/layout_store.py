@@ -38,12 +38,15 @@ from pathlib import Path
 from threading import Lock
 
 
-_DEFAULT_STORE_PATH = Path(__file__).resolve().parents[3] / "data" / "layouts.json"
 _LOCK = Lock()
 
 
 def _store_path() -> Path:
-    path = _DEFAULT_STORE_PATH
+    # Lives under storage/ so that mounting a persistent disk there (e.g. on
+    # Render) preserves confirmed layouts along with uploads and outputs.
+    from app.config import settings
+
+    path = settings.storage_path / "layouts.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 

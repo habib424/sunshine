@@ -1,0 +1,37 @@
+# Render blueprint: one web service runs the FastAPI backend, which also
+# serves the built React frontend (frontend/dist) on the same origin.
+#
+# Storage note: without a disk, uploads/outputs/DB are EPHEMERAL — wiped on
+# every deploy or restart. The transform mechanism works fine that way
+# (upload -> transform -> download in one visit). To keep history and
+# confirmed layouts across deploys, uncomment the `disk` block below
+# (requires a paid instance; pins the service to a single instance).
+services:
+  - type: web
+    name: sunshine
+    runtime: python
+    plan: starter
+    branch: master
+    buildCommand: |
+      pip install -r backend/requirements.txt
+      npm --prefix frontend ci --include=dev
+      npm --prefix frontend run build
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --app-dir backend
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: NODE_VERSION
+        value: 20.18.0
+      - key: ANTHROPIC_API_KEY
+        sync: false # set in the Render dashboard
+      - key: GOOGLE_CLIENT_ID
+        sync: false # OAuth client ID from Google Cloud Console (see RENDER_DEPLOY.md)
+      - key: AUTH_SECRET_KEY
+        generateValue: true # signs the session cookie
+      - key: SESSION_HTTPS_ONLY
+        value: "1"
+    # disk:
+    #   name: sunshine-storage
+    #   mountPath: /opt/render/project/src/backend/storage
+    #   sizeGB: 5

@@ -11,6 +11,9 @@ function Test-Port($port) {
 if (Test-Port 8000) {
     Write-Host "Backend already running on :8000"
 } else {
+    # Claude Code sets ANTHROPIC_BASE_URL in its shells; the backend must not
+    # inherit it or AI chat replies fail (they'd hit the wrong endpoint).
+    Remove-Item Env:ANTHROPIC_BASE_URL -ErrorAction SilentlyContinue
     Start-Process -FilePath "python" -ArgumentList "run.py" -WorkingDirectory (Join-Path $root "backend") -WindowStyle Hidden `
         -RedirectStandardOutput (Join-Path $logs "backend.out.log") -RedirectStandardError (Join-Path $logs "backend.err.log")
     Write-Host "Backend starting on :8000 (logs: backend\storage\temp\backend.err.log)"

@@ -7,7 +7,10 @@ import {
   Download,
   BookOpen,
   GitCompare,
+  LogOut,
 } from "lucide-react";
+import { logout } from "../../api/client";
+import { useAuthStore } from "../../stores/authStore";
 
 const navItems = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
@@ -20,6 +23,16 @@ const navItems = [
 ];
 
 export default function Sidebar() {
+  const user = useAuthStore((s) => s.user);
+
+  const handleSignOut = async () => {
+    try {
+      await logout();
+    } finally {
+      window.location.reload();
+    }
+  };
+
   return (
     <aside className="w-64 bg-white border-r border-gray-200 flex flex-col">
       <div className="p-6 border-b border-gray-200">
@@ -46,6 +59,27 @@ export default function Sidebar() {
           </NavLink>
         ))}
       </nav>
+      {user?.email && (
+        <div className="p-4 border-t border-gray-200 flex items-center gap-2">
+          {user.picture ? (
+            <img src={user.picture} alt="" className="w-7 h-7 rounded-full" referrerPolicy="no-referrer" />
+          ) : (
+            <div className="w-7 h-7 rounded-full bg-sunshine-100 text-sunshine-700 flex items-center justify-center text-xs font-semibold">
+              {user.email[0].toUpperCase()}
+            </div>
+          )}
+          <span className="flex-1 text-xs text-gray-500 truncate" title={user.email}>
+            {user.email}
+          </span>
+          <button
+            onClick={handleSignOut}
+            title="Sign out"
+            className="text-gray-400 hover:text-gray-700 transition-colors"
+          >
+            <LogOut size={15} />
+          </button>
+        </div>
+      )}
     </aside>
   );
 }

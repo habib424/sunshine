@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.analyze import router as analyze_router
+from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
 from app.api.ingest import router as ingest_router
 from app.api.rules import router as rules_router
@@ -11,6 +12,7 @@ from app.api.reconciliation import router as reconciliation_router
 from app.api.uploads import router as uploads_router
 
 api_router = APIRouter()
+api_router.include_router(auth_router)
 api_router.include_router(uploads_router)
 api_router.include_router(playbooks_router)
 api_router.include_router(jobs_router)

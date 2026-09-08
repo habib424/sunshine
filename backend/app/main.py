@@ -1,10 +1,16 @@
+import secrets
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.sessions import SessionMiddleware
+from starlette.staticfiles import StaticFiles
 
 from app.api.router import api_router
-from app.config import settings
+from app.config import PROJECT_ROOT, settings
 from app.db.session import init_db
 
 # Import to register transforms, validators, file transforms, and rules
@@ -49,9 +55,64 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# Paths that must stay reachable without a session: health checks, and the
+# sign-in endpoints themselves.
+_AUTH_EXEMPT_PREFIXES = ("/api/health", "/api/auth/")
+
+
+class AuthRequiredMiddleware(BaseHTTPMiddleware):
+    """Reject unauthenticated /api requests when Google sign-in is configured."""
+
+    async def dispatch(self, request, call_next):
+        path = request.url.path
+        if (
+            settings.auth_required
+            and request.method != "OPTIONS"
+            and path.startswith("/api")
+            and not path.startswith(_AUTH_EXEMPT_PREFIXES)
+            and not request.session.get("user")
+        ):
+            return JSONResponse(status_code=401, content={"detail": "Not signed in"})
+        return await call_next(request)
+
+
+# Middleware added later runs earlier, so SessionMiddleware (added last)
+# parses the cookie before AuthRequiredMiddleware reads the session.
+app.add_middleware(AuthRequiredMiddleware)
+app.add_middleware(
+    SessionMiddleware,
+    # Without a configured key, sessions reset on restart — fine for dev.
+    secret_key=settings.auth_secret_key or secrets.token_hex(32),
+    same_site="lax",
+    https_only=settings.session_https_only,
+    max_age=14 * 24 * 3600,
+)
+
 app.include_router(api_router)
 
 
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "app": settings.app_name}
+
+
+# In production the built frontend (frontend/dist) is served by this app, so
+# one Render service handles everything on one origin. In dev the directory
+# usually doesn't exist and Vite serves the frontend with its /api proxy.
+_frontend_dist = PROJECT_ROOT / "frontend" / "dist"
+if _frontend_dist.exists():
+    app.mount("/assets", StaticFiles(directory=_frontend_dist / "assets"), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str):
+        if full_path.startswith("api/"):
+            return JSONResponse(status_code=404, content={"detail": "Not found"})
+        candidate = (_frontend_dist / full_path).resolve()
+        if (
+            full_path
+            and candidate.is_file()
+            and candidate.is_relative_to(_frontend_dist.resolve())
+        ):
+            return FileResponse(candidate)
+        return FileResponse(_frontend_dist / "index.html")

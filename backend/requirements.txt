@@ -1,0 +1,16 @@
+# Runtime dependencies — keep in sync with pyproject.toml [project.dependencies].
+# Render installs from this file (see render.yaml).
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+sqlalchemy[asyncio]>=2.0.0
+aiosqlite>=0.20.0
+alembic>=1.14.0
+pydantic-settings>=2.6.0
+python-multipart>=0.0.12
+openpyxl>=3.1.0
+pandas>=2.2.0
+pyyaml>=6.0.0
+anthropic>=0.40.0
+jinja2>=3.1.0
+google-auth>=2.35.0
+itsdangerous>=2.2.0
