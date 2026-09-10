@@ -19,6 +19,22 @@ logger = logging.getLogger("sunshine.auth")
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
+_MAX_REASON_CHARS = 300
+
+
+def _safe_reason(exc: Exception, credential: str) -> str:
+    """Readable failure reason with the bearer credential scrubbed out."""
+    reason = str(exc).strip() or exc.__class__.__name__
+    if credential:
+        reason = reason.replace(credential, "<token>")
+        # google-auth echoes malformed tokens, sometimes as a bytes repr.
+        for fragment in (credential[:24], repr(credential.encode())[:24]):
+            if len(fragment) >= 8:
+                reason = reason.replace(fragment, "<token>")
+    if len(reason) > _MAX_REASON_CHARS:
+        reason = reason[:_MAX_REASON_CHARS] + "..."
+    return reason
+
 
 @router.get("/config")
 async def auth_config():
@@ -49,7 +65,14 @@ async def login_with_google(request: Request, body: dict):
         )
     except Exception as e:
         logger.warning("Google token verification failed: %s", e)
-        raise HTTPException(status_code=401, detail="Invalid Google credential")
+        # Surface the real reason: a generic message costs an operator a
+        # debugging round-trip, and nothing here is secret (the client ID is
+        # already public — the browser needs it to render the button). The
+        # credential itself is scrubbed so a bearer token never leaks.
+        raise HTTPException(
+            status_code=401,
+            detail=f"Google sign-in failed: {_safe_reason(e, credential)}",
+        )
 
     email = (claims.get("email") or "").lower()
     domain = settings.auth_allowed_domain.lower()
