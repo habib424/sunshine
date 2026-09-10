@@ -12,6 +12,9 @@ services:
     runtime: python
     plan: starter
     branch: master
+    # Deploy every push to master. Without this the service can sit on the
+    # commit it was created from while later fixes never reach production.
+    autoDeploy: true
     buildCommand: |
       pip install -r backend/requirements.txt
       npm --prefix frontend ci --include=dev
