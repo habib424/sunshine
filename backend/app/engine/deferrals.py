@@ -49,12 +49,14 @@ DEFERRAL_INTENTS = {
 
 
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
+_ISO_DATE_IN_TEXT = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
 _DATE_IN_TEXT = re.compile(r"(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})")
 
 
 @dataclass
 class DeferralAnalysis:
     direction: Direction
+    preferred_sheet: str | None = None
     source_sheets: list[dict[str, Any]] = field(default_factory=list)
     source_sheet: str | None = None
     header_row: int | None = None
@@ -116,25 +118,55 @@ class DeferralAnalysis:
         }
 
 
-def intent_to_direction(intent: str, file_path: Path | None = None) -> Direction:
-    if "revenue" in intent:
+def intent_to_direction(
+    intent: str,
+    file_path: Path | None = None,
+    display_name: str | None = None,
+) -> Direction:
+    # An explicit intent name always wins.
+    if "revenue" in intent or "income" in intent:
         return "revenue"
-    if "cost" in intent:
+    if "cost" in intent or "prepay" in intent or "prepaid" in intent:
         return "cost"
+
+    # Otherwise infer from every available signal: the original (display)
+    # filename, the stored filename, the sheet names, and — most reliably —
+    # the actual cell text, where a report title like "Deferred revenue"
+    # usually sits in the first rows. The stored file is named by a UUID, so
+    # the on-disk stem carries no signal; the display name and cell content do.
+    parts: list[str] = []
+    if display_name:
+        parts.append(display_name)
     if file_path is not None:
+        parts.append(file_path.stem)
         try:
             import openpyxl
-            workbook = openpyxl.load_workbook(file_path, read_only=True)
-            context = f"{file_path.stem} {' '.join(workbook.sheetnames)}".lower()
+            workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+            parts.extend(workbook.sheetnames)
+            for ws in workbook.worksheets:
+                for row in ws.iter_rows(min_row=1, max_row=8, values_only=True):
+                    parts.extend(str(v) for v in row if v is not None)
             workbook.close()
-            if "revenue" in context or "income" in context:
-                return "revenue"
         except Exception:
             pass
+
+    context = " ".join(parts).lower()
+    revenue_hits = sum(context.count(term) for term in ("deferred revenue", "deferred income", "revenue", "income", "unearned"))
+    cost_hits = sum(context.count(term) for term in ("deferred cost", "prepaid", "prepayment", "prepay", "expense"))
+    if revenue_hits > cost_hits:
+        return "revenue"
+    if cost_hits > revenue_hits:
+        return "cost"
+    # Genuine tie or no signal: default to cost (the more common migration),
+    # but the user can correct it in one message.
     return "cost"
 
 
-def analyze_deferral_workbook(file_path: Path, direction: Direction) -> DeferralAnalysis:
+def analyze_deferral_workbook(
+    file_path: Path,
+    direction: Direction,
+    preferred_sheet: str | None = None,
+) -> DeferralAnalysis:
     sheets = pd.read_excel(file_path, sheet_name=None, header=None, engine="openpyxl")
     analysis = DeferralAnalysis(direction=direction)
 
@@ -142,7 +174,44 @@ def analyze_deferral_workbook(file_path: Path, direction: Direction) -> Deferral
     analysis.reference_sheet = _find_reference_sheet(sheets)
     source_candidates = _find_source_sheets_and_roles(sheets, analysis.target_example_sheet, direction)
 
+    # The user picked a specific tab: only that sheet may be the source.
+    # Reference/example tabs are still detected across the whole workbook.
+    if preferred_sheet and preferred_sheet in sheets:
+        analysis.preferred_sheet = preferred_sheet
+        source_candidates = [c for c in source_candidates if c["sheet"] == preferred_sheet]
+
+    if not source_candidates:
+        # Header wordings the keyword rules don't know (rephrased labels,
+        # typos, unusual exports): let the AI propose the layout, validate it
+        # against the real cells, and continue deterministically from there.
+        proposal = _propose_layout_via_ai(file_path, sheets, direction, analysis.preferred_sheet)
+        if proposal:
+            source_candidates = [{
+                "sheet": proposal["sheet"],
+                "header_row": proposal["header_row"],
+                "roles": proposal["roles"],
+                "role_confidence": {role: 0.66 for role in proposal["roles"]},
+                "confidence": 0.66,
+            }]
+            analysis.assumptions.append(
+                "The column headers did not match known wordings, so the layout "
+                "was proposed by AI from the sheet contents — review the "
+                "detected columns before running."
+            )
+
     if source_candidates:
+        # AI completes whatever header wordings the keyword rules missed, so
+        # unusual labels never turn into questions for the user.
+        _complete_candidate_roles_via_ai(file_path, sheets, source_candidates, direction, analysis)
+
+        # A schedule with no invoice/reference column still identifies its
+        # lines: the description stands in as the document reference.
+        for candidate in source_candidates:
+            candidate_roles = candidate["roles"]
+            if "source_reference" not in candidate_roles and "description" in candidate_roles:
+                candidate_roles["source_reference"] = candidate_roles["description"]
+                candidate.setdefault("role_confidence", {})["source_reference"] = 0.60
+
         analysis.source_sheets = source_candidates
         source_candidate = source_candidates[0]
         analysis.source_sheet = source_candidate["sheet"]
@@ -151,6 +220,11 @@ def analyze_deferral_workbook(file_path: Path, direction: Direction) -> Deferral
         analysis.role_confidence = source_candidate["role_confidence"]
         analysis.confidence = source_candidate["confidence"]
         analysis.valid_source_rows = _count_valid_rows(file_path, analysis)
+        if analysis.roles.get("source_reference") == analysis.roles.get("description"):
+            analysis.assumptions.append(
+                "No invoice/reference column was found — line descriptions "
+                "serve as the document reference."
+            )
     else:
         analysis.questions.append("I could not identify the source schedule. Which sheet contains the deferred balances?")
 
@@ -230,7 +304,7 @@ def apply_user_message_to_analysis(
             analysis.facts.pop("release_end_offset_years", None)
 
     # Re-run fact/validation derivations with updated user-provided facts.
-    refreshed = analyze_deferral_workbook(file_path, analysis.direction)
+    refreshed = analyze_deferral_workbook(file_path, analysis.direction, analysis.preferred_sheet)
     refreshed.facts.update(analysis.facts)
     refreshed.assumptions = _infer_assumptions(refreshed)
     refreshed.questions = _conversation_questions(refreshed)
@@ -268,7 +342,7 @@ def apply_structured_updates_to_analysis(
     if "currency" in updates:
         facts.pop("_currency_evidence", None)
 
-    refreshed = analyze_deferral_workbook(file_path, direction)
+    refreshed = analyze_deferral_workbook(file_path, direction, analysis.preferred_sheet)
     refreshed.facts.update(facts)
     refreshed.assumptions = _infer_assumptions(refreshed)
     refreshed.questions = _conversation_questions(refreshed)
@@ -326,6 +400,10 @@ def transform_deferrals_to_light_je(file_path: Path, analysis: DeferralAnalysis)
 
         description = _clean_text(row["description"])
         source_reference = _clean_reference(row["source_reference"])
+        if "description" in row and _clean_reference(row["description"]) == source_reference:
+            # Reference is the description (aliased or identical text):
+            # don't repeat it inside the document number.
+            source_reference = ""
         document_description = f"{analysis.facts.get('description_prefix', 'Data migration deferred ')}{description}"
         document_number = f"{document_description}{source_reference}"
 
@@ -568,6 +646,103 @@ def _find_reference_sheet(sheets: dict[str, pd.DataFrame]) -> str | None:
     return None
 
 
+_AI_ROLE_DESCRIPTIONS = {
+    "amount": "remaining/opening balance per line as at migration",
+    "description": "line description, item name or breakdown text",
+    "source_reference": "invoice, document or voucher reference",
+    "deferral_account": "balance sheet account (prepaid / deferred / B/S)",
+    "release_account": "P&L account the balance releases to (expense or revenue)",
+    "release_start_date": "date the release starts for that line",
+    "release_end_date": "date the release ends for that line",
+    "currency": "transaction currency code",
+    "entity": "entity or company name",
+    "business_partner": "customer, vendor or supplier name",
+    "department": "department or cost centre",
+    "release_template": "release template name",
+}
+
+# Roles whose absence causes questions or lost data — worth an AI look.
+_AI_COMPLETION_ROLES = (
+    "amount",
+    "description",
+    "source_reference",
+    "deferral_account",
+    "release_account",
+    "release_start_date",
+    "release_end_date",
+    "currency",
+)
+
+
+def _complete_candidate_roles_via_ai(
+    file_path: Path,
+    sheets: dict[str, pd.DataFrame],
+    source_candidates: list[dict[str, Any]],
+    direction: Direction,
+    analysis: DeferralAnalysis,
+) -> None:
+    """Keywords found the table; let the AI map any headers they missed."""
+    from app.ai.layout_proposer import complete_roles
+
+    kind = "deferred revenue" if direction == "revenue" else "prepaid expense / deferred cost"
+    mapped_notes: list[str] = []
+    for candidate in source_candidates:
+        wanted = {
+            role: _AI_ROLE_DESCRIPTIONS[role]
+            for role in _AI_COMPLETION_ROLES
+            if role not in candidate["roles"]
+        }
+        if not wanted or candidate["sheet"] not in sheets:
+            continue
+        extra = complete_roles(
+            file_path,
+            sheets[candidate["sheet"]],
+            candidate["sheet"],
+            candidate["header_row"],
+            known_roles=candidate["roles"],
+            wanted_roles=wanted,
+            task=f"This sheet holds a {kind} schedule, one row per open item.",
+        )
+        for role, header in extra.items():
+            candidate["roles"][role] = header
+            candidate.setdefault("role_confidence", {})[role] = 0.66
+            mapped_notes.append(f"`{header}` -> {role.replace('_', ' ')}")
+    if mapped_notes:
+        analysis.assumptions.append(
+            "AI mapped columns the keyword rules missed: " + ", ".join(sorted(set(mapped_notes))) + "."
+        )
+
+
+def _propose_layout_via_ai(
+    file_path: Path,
+    sheets: dict[str, pd.DataFrame],
+    direction: Direction,
+    preferred_sheet: str | None,
+) -> dict | None:
+    from app.ai.layout_proposer import propose_layout
+
+    kind = "deferred revenue" if direction == "revenue" else "prepaid expense / deferred cost"
+    proposal = propose_layout(
+        file_path,
+        sheets,
+        task=(
+            f"Find the {kind} schedule: a table with one row per open item "
+            "carrying its remaining balance to migrate."
+        ),
+        roles=dict(_AI_ROLE_DESCRIPTIONS),
+        required_roles=["amount"],
+        preferred_sheet=preferred_sheet,
+    )
+    if proposal is None:
+        return None
+    # Hold the AI to the same bar as the keyword detector: the amount plus
+    # at least two more of the required roles.
+    required = {"amount", "description", "source_reference", "deferral_account", "release_account"}
+    if len(required & set(proposal["roles"])) < 3:
+        return None
+    return proposal
+
+
 def _find_source_sheets_and_roles(
     sheets: dict[str, pd.DataFrame],
     target_example_sheet: str | None,
@@ -653,22 +828,30 @@ def _score_header_for_roles(norm: str, direction: Direction) -> list[tuple[str, 
 
     if any(term in norm for term in ("remainder amount", "remaining amount", "remaining balance", "open amount", "deferred amount", "deferral amount", "balance amount", "b fwd", "brought forward")):
         add("amount", 0.98)
+    elif any(term in norm for term in ("balance as at", "balance as of", "balance at migration", "migration balance")):
+        add("amount", 0.85)
     elif norm in {"amount", "balance", "value"} or norm.endswith(" amount"):
         add("amount", 0.70)
 
     if any(term in norm for term in ("description", "line text", "memo", "narration", "text", "details")):
         add("description", 0.95 if norm != "name" else 0.55)
+    elif any(term in norm for term in ("breakdown", "itemised", "itemized")):
+        add("description", 0.80)
     elif norm in {"name", "label"}:
         add("description", 0.45)
 
     if any(term in norm for term in ("entry", "document", "doc no", "voucher", "invoice", "inv number", "inv no", "reference", "ref", "transaction id")):
         add("source_reference", 0.90)
 
+    tokens = norm.split()
     release_terms = ["cost account", "expense account", "p l account", "pl account"]
     if direction == "revenue":
         release_terms.extend(["revenue account", "income account", "sales account"])
     if any(term in norm for term in release_terms):
         add("release_account", 0.98)
+    elif "account" in norm and (("p" in tokens and "l" in tokens) or "pnl" in tokens or "profit and loss" in norm):
+        # e.g. "Light account P&L" normalizes to "light account p l"
+        add("release_account", 0.90)
     elif any(term in norm for term in ("cost centre account", "nominal account")):
         add("release_account", 0.65)
 
@@ -683,12 +866,15 @@ def _score_header_for_roles(norm: str, direction: Direction) -> list[tuple[str, 
     ]
     if any(term in norm for term in deferral_terms):
         add("deferral_account", 0.98)
+    elif "account" in norm and (("b" in tokens and "s" in tokens) or "balance sheet" in norm):
+        # e.g. "Light account B/S" normalizes to "light account b s"
+        add("deferral_account", 0.90)
     elif norm in {"account", "account code", "account number", "gl account", "ledger account"}:
         add("generic_account", 0.68)
 
     if norm == "from" or any(term in norm for term in ("start date", "service start", "period start", "release start")):
         add("release_start_date", 0.82)
-    if norm == "to" or any(term in norm for term in ("end date", "service end", "period end", "release end")):
+    if norm == "to" or any(term in norm for term in ("end date", "service end", "period end", "release end", "end release")):
         add("release_end_date", 0.90)
 
     if any(term in norm for term in ("currency", "ccy")):
@@ -902,10 +1088,14 @@ def _reference_warnings(file_path: Path, analysis: DeferralAnalysis) -> list[str
 
 def _valid_source_rows(source: pd.DataFrame, roles: dict[str, str]) -> pd.DataFrame:
     amount_col = roles["amount"]
-    ref_col = roles["source_reference"]
+    # Schedules without an invoice/reference column fall back to the
+    # description as the line identifier.
+    ref_col = roles.get("source_reference") or roles.get("description")
     df = source.copy()
     df["_amount_numeric"] = df[amount_col].apply(_to_float)
-    mask = df["_amount_numeric"].notna() & df[ref_col].notna()
+    mask = df["_amount_numeric"].notna()
+    if ref_col is not None and ref_col in df.columns:
+        mask &= df[ref_col].notna()
     for role in ("deferral_account", "release_account"):
         if role in roles:
             mask &= df[roles[role]].notna()
@@ -1103,6 +1293,15 @@ def _to_datetime(value: Any) -> datetime | None:
 
 
 def _parse_any_date(text: str) -> datetime | None:
+    # ISO dates first: the day/month regex below would otherwise split the
+    # year of "2026-08-31" and read it as 26-08-(20)31.
+    iso = _ISO_DATE_IN_TEXT.search(text)
+    if iso:
+        year, month, day = (int(group) for group in iso.groups())
+        try:
+            return datetime(year, month, day)
+        except ValueError:
+            return None
     match = _DATE_IN_TEXT.search(text)
     if not match:
         parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)

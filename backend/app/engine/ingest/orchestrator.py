@@ -75,19 +75,24 @@ class IngestResult:
         }
 
 
-def ingest(file_path: Path, intent: str) -> IngestResult:
+def ingest(file_path: Path, intent: str, preferred_sheet: str | None = None) -> IngestResult:
     """
     Run the deterministic ingest pipeline for a file under a declared intent.
 
     Never calls an AI. If the detector can't produce a usable layout,
     the caller gets a `needs_help` result and can decide whether to invoke
     the AI assistant to propose one.
+
+    When the user picked a specific tab, `preferred_sheet` restricts
+    detection to that sheet.
     """
     intent_spec = get_intent(intent)
     # Validate contract exists early so a typo'd intent fails fast.
     get_contract(intent_spec["contract"])
 
     sheets = pd.read_excel(file_path, sheet_name=None, header=None, engine="openpyxl")
+    if preferred_sheet and preferred_sheet in sheets:
+        sheets = {preferred_sheet: sheets[preferred_sheet]}
 
     # Detection has to run before we can fingerprint, because the fingerprint
     # is derived from the detected header row — that's what keeps the hash

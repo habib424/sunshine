@@ -190,6 +190,8 @@ _DATE_IN_TEXT_RE = re.compile(
 @dataclass
 class BillsAPAnalysis:
     source_sheet: str | None = None
+    preferred_sheet: str | None = None
+    ai_notes: list[str] = field(default_factory=list)
     header_row: int | None = None
     layout: str = "flat"  # "flat" | "grouped"
     roles: dict[str, str] = field(default_factory=dict)
@@ -250,15 +252,113 @@ class BillsAPAnalysis:
 # --------------------------------------------------------------------------
 
 
-def analyze_bills_ap_workbook(file_path: Path) -> BillsAPAnalysis:
+_AI_ROLE_DESCRIPTIONS = {
+    "invoice_number": "invoice, document or bill number",
+    "vendor_name": "vendor or supplier name",
+    "transaction_type": "row type (invoice, credit note, payment)",
+    "due_date": "due date",
+    "invoice_date": "invoice or document date",
+    "open_amount": "open/remaining balance per row",
+    "open_amount_local": "open balance in the local currency",
+    "open_amount_txn": "open balance in the transaction currency",
+    "amount": "original document amount",
+    "currency": "transaction currency code",
+    "age": "aging bucket or days overdue",
+}
+_AI_COMPLETION_ROLES = (
+    "invoice_number", "vendor_name", "invoice_date", "due_date",
+    "currency", "open_amount", "open_amount_txn", "amount", "transaction_type",
+)
+
+
+def _complete_roles_via_ai(
+    file_path: Path,
+    sheets: dict[str, pd.DataFrame],
+    source: dict,
+    analysis: BillsAPAnalysis,
+) -> None:
+    from app.ai.layout_proposer import complete_roles
+
+    wanted = {
+        role: _AI_ROLE_DESCRIPTIONS[role]
+        for role in _AI_COMPLETION_ROLES
+        if role not in source["roles"]
+    }
+    if not wanted or source["sheet"] not in sheets:
+        return
+    extra = complete_roles(
+        file_path,
+        sheets[source["sheet"]],
+        source["sheet"],
+        source["header_row"],
+        known_roles=source["roles"],
+        wanted_roles=wanted,
+        task="This sheet is an open accounts payable aging/detail report, one row per open item.",
+    )
+    for role, header in extra.items():
+        source["roles"][role] = header
+        source.setdefault("role_confidence", {})[role] = 0.66
+    if extra:
+        analysis.ai_notes.append(
+            "AI mapped columns the keyword rules missed: "
+            + ", ".join(f"`{header}` -> {role.replace('_', ' ')}" for role, header in sorted(extra.items()))
+            + "."
+        )
+
+
+def _propose_source_via_ai(
+    file_path: Path,
+    sheets: dict[str, pd.DataFrame],
+    analysis: BillsAPAnalysis,
+) -> dict | None:
+    from app.ai.layout_proposer import propose_layout
+
+    candidates = {name: df for name, df in sheets.items() if name != analysis.template_sheet}
+    proposal = propose_layout(
+        file_path,
+        candidates,
+        task="Find the open accounts payable detail: a table with one row per outstanding vendor invoice or credit note.",
+        roles=dict(_AI_ROLE_DESCRIPTIONS),
+        required_roles=["invoice_number", "vendor_name"],
+        preferred_sheet=analysis.preferred_sheet,
+    )
+    if proposal is None:
+        return None
+    roles = proposal["roles"]
+    if not any(r in roles for r in ("invoice_date", "due_date")):
+        return None
+    if not any(r in roles for r in ("open_amount", "open_amount_local", "open_amount_txn", "amount")):
+        return None
+    analysis.ai_notes.append(
+        "The column headers did not match known wordings, so the layout was "
+        "proposed by AI from the sheet contents — review the detected columns "
+        "before running."
+    )
+    return {
+        "sheet": proposal["sheet"],
+        "header_row": proposal["header_row"],
+        "layout": "flat",
+        "roles": roles,
+        "role_confidence": {role: 0.66 for role in roles},
+        "confidence": 0.66,
+    }
+
+
+def analyze_bills_ap_workbook(file_path: Path, preferred_sheet: str | None = None) -> BillsAPAnalysis:
     sheets = pd.read_excel(file_path, sheet_name=None, header=None, engine="openpyxl")
     analysis = BillsAPAnalysis()
+    if preferred_sheet and preferred_sheet in sheets:
+        analysis.preferred_sheet = preferred_sheet
 
     template = _find_template_sheet(sheets)
     if template:
         analysis.template_sheet = template["sheet"]
 
-    source = _find_source_sheet(sheets, analysis.template_sheet)
+    source = _find_source_sheet(sheets, analysis.template_sheet, analysis.preferred_sheet)
+    if source:
+        _complete_roles_via_ai(file_path, sheets, source, analysis)
+    else:
+        source = _propose_source_via_ai(file_path, sheets, analysis)
     if not source:
         analysis.questions = ["Which sheet contains the open AP invoice detail?"]
         return analysis
@@ -299,7 +399,7 @@ def apply_user_message_to_analysis(
     if _mentions_disable_vendor_id(message):
         overrides["split_vendor_code"] = False
 
-    refreshed = analyze_bills_ap_workbook(file_path)
+    refreshed = analyze_bills_ap_workbook(file_path, analysis.preferred_sheet)
     refreshed.facts.update({k: v for k, v in overrides.items() if v not in (None, "")})
     # The summary depends on facts only for labelling, but re-run so the
     # analysis message and the transform always agree.
@@ -325,7 +425,7 @@ def apply_structured_updates_to_analysis(
     if "split_vendor_code" in facts and isinstance(facts["split_vendor_code"], str):
         facts["split_vendor_code"] = facts["split_vendor_code"].lower() == "true"
 
-    refreshed = analyze_bills_ap_workbook(file_path)
+    refreshed = analyze_bills_ap_workbook(file_path, analysis.preferred_sheet)
     refreshed.facts.update({key: value for key, value in facts.items() if value not in (None, "")})
     sheets = pd.read_excel(file_path, sheet_name=None, header=None, engine="openpyxl")
     _summarize_open_items(sheets, refreshed)
@@ -446,11 +546,15 @@ def _find_template_sheet(sheets: dict[str, pd.DataFrame]) -> dict | None:
 def _find_source_sheet(
     sheets: dict[str, pd.DataFrame],
     template_sheet: str | None,
+    preferred_sheet: str | None = None,
 ) -> dict | None:
     candidates: list[dict] = []
     for name, df in sheets.items():
         if name == template_sheet:
             continue  # the target template is a worked example, never the source
+        # The user picked a specific tab: only that sheet may be the source.
+        if preferred_sheet and preferred_sheet in sheets and name != preferred_sheet:
+            continue
         candidate = _detect_layout(name, df)
         if candidate:
             candidates.append(candidate)
@@ -1028,7 +1132,8 @@ def _refresh_derived(analysis: BillsAPAnalysis) -> None:
 
 def _infer_assumptions(analysis: BillsAPAnalysis) -> list[str]:
     facts = analysis.facts
-    assumptions = [
+    assumptions = list(analysis.ai_notes)
+    assumptions += [
         "One row per open item, at its open balance as of the report date — not the "
         "original document amount.",
         "A positive amount is an invoice; a negative amount is a credit note in the same "

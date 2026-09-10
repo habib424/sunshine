@@ -90,6 +90,7 @@ class FXAdjustmentRow:
 @dataclass
 class FXAdjustmentAnalysis:
     source_sheet: str | None = None
+    preferred_sheet: str | None = None
     header_row: int | None = None
     roles: dict[str, str] = field(default_factory=dict)
     facts: dict[str, Any] = field(default_factory=dict)
@@ -122,11 +123,26 @@ class FXAdjustmentAnalysis:
         }
 
 
-def analyze_fx_workbook(file_path: Path) -> FXAdjustmentAnalysis:
+def analyze_fx_workbook(file_path: Path, preferred_sheet: str | None = None) -> FXAdjustmentAnalysis:
     sheets = pd.read_excel(file_path, sheet_name=None, header=None, engine="openpyxl")
     analysis = FXAdjustmentAnalysis()
 
+    # The user picked a specific tab: restrict detection to that sheet.
+    if preferred_sheet and preferred_sheet in sheets:
+        analysis.preferred_sheet = preferred_sheet
+        sheets = {preferred_sheet: sheets[preferred_sheet]}
+
     source = _find_source_sheet(sheets)
+    if not source:
+        # Header wordings the keyword rules don't know: let the AI propose
+        # the layout, validated against the real cells.
+        source = _propose_source_via_ai(file_path, sheets)
+        if source:
+            analysis.assumptions.append(
+                "The column headers did not match known wordings, so the layout "
+                "was proposed by AI from the sheet contents — review the "
+                "detected columns before running."
+            )
     if not source:
         analysis.questions.append(
             "Which sheet contains the bank accounts with booked balances and real bank balances?"
@@ -185,6 +201,7 @@ def apply_user_message_to_analysis(
     analysis: FXAdjustmentAnalysis,
     message: str,
     file_path: Path,
+    preferred_sheet: str | None = None,
 ) -> FXAdjustmentAnalysis:
     facts = dict(analysis.facts)
 
@@ -212,7 +229,7 @@ def apply_user_message_to_analysis(
     if posting_date:
         facts["posting_date"] = posting_date
 
-    refreshed = analyze_fx_workbook(file_path)
+    refreshed = analyze_fx_workbook(file_path, preferred_sheet or analysis.preferred_sheet)
     refreshed.facts.update({k: v for k, v in facts.items() if v not in (None, "")})
     _finalise(refreshed)
     return refreshed
@@ -238,7 +255,7 @@ def apply_structured_updates_to_analysis(
 
     facts = dict(analysis.facts)
     facts.update(updates)
-    refreshed = analyze_fx_workbook(file_path)
+    refreshed = analyze_fx_workbook(file_path, analysis.preferred_sheet)
     refreshed.facts.update({key: value for key, value in facts.items() if value not in (None, "")})
     _finalise(refreshed)
     return refreshed
@@ -419,6 +436,51 @@ def _find_source_sheet(sheets: dict[str, pd.DataFrame]) -> dict | None:
             if best is None or candidate["confidence"] > best["confidence"]:
                 best = candidate
     return best
+
+
+def _propose_source_via_ai(file_path: Path, sheets: dict[str, pd.DataFrame]) -> dict | None:
+    from app.ai.layout_proposer import propose_layout
+
+    proposal = propose_layout(
+        file_path,
+        sheets,
+        task=(
+            "Find the bank balance table: one row per bank account, with the "
+            "booked balance in the account's own currency and the real bank "
+            "balance provided by the customer."
+        ),
+        roles={
+            "account": "bank GL account code",
+            "description": "bank account name/description (often contains the currency)",
+            "balance_local": "booked balance in the entity's local currency",
+            "balance_currency": "booked balance in the account's own currency",
+            "real_balance": "real bank balance from the customer (may be text like 'Nordea EUR: 272 420,54')",
+        },
+        required_roles=["account", "balance_currency", "real_balance"],
+    )
+    if proposal is None:
+        return None
+
+    df = sheets[proposal["sheet"]]
+    header_values = [str(v) for v in df.iloc[proposal["header_row"]].tolist() if pd.notna(v)]
+    role_columns: dict[str, int] = {}
+    header_row = df.iloc[proposal["header_row"]].tolist()
+    for role, header in proposal["roles"].items():
+        for col_idx, value in enumerate(header_row):
+            if value is not None and not (isinstance(value, float) and pd.isna(value)) and str(value) == header:
+                role_columns[role] = col_idx
+                break
+    if any(role not in role_columns for role in ("account", "balance_currency", "real_balance")):
+        return None
+
+    return {
+        "sheet": proposal["sheet"],
+        "header_row": proposal["header_row"],
+        "roles": proposal["roles"],
+        "role_columns": role_columns,
+        "header_values": header_values,
+        "confidence": 0.66,
+    }
 
 
 def _collect_rows(df: pd.DataFrame, source: dict, analysis: FXAdjustmentAnalysis) -> None:

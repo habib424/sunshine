@@ -161,10 +161,13 @@ export async function runDirect(uploadId: string, playbookConfig: any, outputFil
   });
 }
 
-export async function startChat(uploadId: string, intent?: string) {
+export async function startChat(uploadId: string, intent?: string, sheet?: string | null) {
   return request<any>(`/chat/start/${uploadId}`, {
     method: "POST",
-    body: JSON.stringify({ intent: intent || "convert_to_light_je" }),
+    body: JSON.stringify({
+      intent: intent || "convert_to_light_je",
+      sheet: sheet || undefined,
+    }),
   });
 }
 

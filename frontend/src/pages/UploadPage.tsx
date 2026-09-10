@@ -4,9 +4,13 @@ import IntentAnalysis from "../components/upload/IntentAnalysis";
 import TransformChat from "../components/chat/TransformChat";
 import { uploadFiles, startChat, getExportUrl, getIntents } from "../api/client";
 import { useAppStore } from "../stores/appStore";
-import { Target, FileSearch, GitCompare, Loader2, CalendarClock, Receipt, ReceiptText, ArrowLeftRight } from "lucide-react";
+import { Target, FileSearch, GitCompare, Loader2, CalendarClock, Receipt, ReceiptText, ArrowLeftRight, Table2, Wand2 } from "lucide-react";
 
-type Step = "upload" | "intent" | "starting" | "analyze" | "chat" | "done";
+type Step = "upload" | "intent" | "sheet" | "starting" | "analyze" | "chat" | "done";
+
+// Reconciliation always reads multiple tabs (JE + TB), so picking one
+// single tab would only hurt it.
+const MULTI_SHEET_INTENTS = new Set(["reconcile_je_to_gl"]);
 
 const INTENT_ICONS: Record<string, typeof Target> = {
   convert_to_light_je: Target,
@@ -26,6 +30,8 @@ export default function UploadPage() {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadId, setUploadId] = useState<string | null>(null);
   const [uploadedName, setUploadedName] = useState("");
+  const [sheetNames, setSheetNames] = useState<string[]>([]);
+  const [selectedSheet, setSelectedSheet] = useState<string | null>(null);
   const [selectedIntent, setSelectedIntent] = useState<string | null>(null);
   const [intents, setIntents] = useState<any[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -59,6 +65,8 @@ export default function UploadPage() {
       addUploads(uploaded);
       setUploadId(u.id);
       setUploadedName(u.original_name);
+      setSheetNames(u.sheet_names || []);
+      setSelectedSheet(null);
       setStep("intent");
     } catch (e: any) {
       setError(e.message || "Unknown error");
@@ -68,23 +76,43 @@ export default function UploadPage() {
     }
   };
 
-  const handleIntentSelected = async (intent: string) => {
+  const needsSheetChoice = (intent: string) =>
+    sheetNames.length > 1 && !MULTI_SHEET_INTENTS.has(intent);
+
+  const beginChat = async (intent: string, sheet: string | null) => {
     if (!uploadId) return;
-    setSelectedIntent(intent);
     setError(null);
     setStep("starting");
     try {
       // Every intent, including validation, starts an AI conversation.
       // Deterministic engines still own validation and accounting execution.
-      const chatResult = await startChat(uploadId, intent);
+      const chatResult = await startChat(uploadId, intent, sheet);
       setSessionId(chatResult.session_id);
       setInitialMessage(chatResult.message);
       setInitialHasScript(chatResult.has_script || false);
       setStep("chat");
     } catch (e: any) {
       setError(e.message || "Failed to start session");
-      setStep("intent");
+      setStep(needsSheetChoice(intent) ? "sheet" : "intent");
     }
+  };
+
+  const handleIntentSelected = async (intent: string) => {
+    if (!uploadId) return;
+    setSelectedIntent(intent);
+    setError(null);
+    if (needsSheetChoice(intent)) {
+      // Multiple tabs: let the user pick one (or keep auto-detect).
+      setStep("sheet");
+      return;
+    }
+    await beginChat(intent, null);
+  };
+
+  const handleSheetChosen = async (sheet: string | null) => {
+    setSelectedSheet(sheet);
+    if (!selectedIntent) return;
+    await beginChat(selectedIntent, sheet);
   };
   const handleProceedToChat = async () => {
     if (!uploadId || !selectedIntent) return;
@@ -115,6 +143,8 @@ export default function UploadPage() {
     setIntents([]);
     setUploadedName("");
     setUploadId(null);
+    setSheetNames([]);
+    setSelectedSheet(null);
     setSelectedIntent(null);
     setJobId(null);
     setError(null);
@@ -126,14 +156,21 @@ export default function UploadPage() {
     setInitialMessage("");
     setInitialHasScript(false);
     setIntents([]);
+    setSelectedSheet(null);
     setSelectedIntent(null);
     setJobId(null);
     setError(null);
   };
 
-  const VISIBLE_STEPS: Step[] = ["upload", "intent", "chat", "done"];  const STEP_LABELS: Record<Step, string> = {
+  const showSheetStep =
+    step === "sheet" || (selectedSheet !== null && sheetNames.length > 1);
+  const VISIBLE_STEPS: Step[] = showSheetStep
+    ? ["upload", "intent", "sheet", "chat", "done"]
+    : ["upload", "intent", "chat", "done"];
+  const STEP_LABELS: Record<Step, string> = {
     upload: "Upload",
     intent: "Intent",
+    sheet: "Sheet",
     starting: "Preparing",
     analyze: "Analyze",
     chat: "Configure",
@@ -144,9 +181,9 @@ export default function UploadPage() {
     <div className={step === "chat" ? "max-w-4xl" : "max-w-3xl"}>
       <div className="flex items-center justify-between mb-2">
         <h1 className="text-2xl font-bold text-gray-900">
-          {step === "intent" ? "What do you need?" : step === "analyze" ? "Validation Report" : step === "chat" ? (selectedIntent === "validate_je" ? "Validate File" : selectedIntent === "reconcile_je_to_gl" ? "Reconciliation" : "Configure Migration") : "Upload & Migrate"}
+          {step === "intent" ? "What do you need?" : step === "sheet" ? "Which tab?" : step === "analyze" ? "Validation Report" : step === "chat" ? (selectedIntent === "validate_je" ? "Validate File" : selectedIntent === "reconcile_je_to_gl" ? "Reconciliation" : "Configure Migration") : "Upload & Migrate"}
         </h1>
-        {(step === "chat" || step === "intent" || step === "analyze") && (
+        {(step === "chat" || step === "intent" || step === "sheet" || step === "analyze") && (
           <button onClick={handleChangeTask} className="px-3 py-1.5 text-xs text-gray-500 border border-gray-300 rounded-lg hover:bg-gray-50">
             Change task
           </button>
@@ -155,6 +192,8 @@ export default function UploadPage() {
       <p className="text-gray-500 mb-4 text-sm">
         {step === "intent"
           ? `Choose what to do with ${uploadedName}`
+          : step === "sheet"
+          ? `${uploadedName} has ${sheetNames.length} tabs — pick the one to work on`
           : step === "analyze"
           ? `Deterministic validation of ${uploadedName}`
           : step === "chat"
@@ -165,9 +204,10 @@ export default function UploadPage() {
       {/* Step indicator */}
       <div className="flex items-center gap-2 mb-6">
         {VISIBLE_STEPS.map((s, i) => {
-          const currentIdx = ["upload", "intent", "starting", "chat", "done"].indexOf(step);
-          const thisIdx = ["upload", "intent", "starting", "chat", "done"].indexOf(s);
-          const active = step === s || (step === "starting" && s === "intent");
+          const ORDER = ["upload", "intent", "sheet", "starting", "chat", "done"];
+          const currentIdx = ORDER.indexOf(step);
+          const thisIdx = ORDER.indexOf(s);
+          const active = step === s || (step === "starting" && s === (showSheetStep ? "sheet" : "intent"));
           const past = currentIdx > thisIdx;
           return (
             <div key={s} className="flex items-center gap-2">
@@ -218,6 +258,35 @@ export default function UploadPage() {
                 </button>
               );
             })}
+          </div>
+        </div>
+      )}
+
+      {step === "sheet" && (
+        <div className="bg-white rounded-xl border border-gray-200 p-6">
+          <div className="grid gap-3">
+            <button
+              onClick={() => handleSheetChosen(null)}
+              className="flex items-start gap-3 p-4 rounded-lg border border-sunshine-300 bg-sunshine-50/50 hover:border-sunshine-400 hover:bg-sunshine-50 text-left transition-all cursor-pointer"
+            >
+              <Wand2 className="w-5 h-5 mt-0.5 flex-shrink-0 text-sunshine-500" />
+              <div>
+                <div className="text-sm font-medium text-gray-800">Let Sunshine detect it</div>
+                <div className="text-xs text-gray-400 mt-0.5">
+                  Recommended — the layout detector scores every tab and picks the best match.
+                </div>
+              </div>
+            </button>
+            {sheetNames.map((name) => (
+              <button
+                key={name}
+                onClick={() => handleSheetChosen(name)}
+                className="flex items-center gap-3 p-4 rounded-lg border border-gray-200 hover:border-sunshine-400 hover:bg-sunshine-50 text-left transition-all cursor-pointer"
+              >
+                <Table2 className="w-5 h-5 flex-shrink-0 text-gray-400" />
+                <div className="text-sm font-medium text-gray-800">{name}</div>
+              </button>
+            ))}
           </div>
         </div>
       )}

@@ -42,6 +42,7 @@ class IntentOption(BaseModel):
 
 class AnalyzeRequest(BaseModel):
     intent: str
+    sheet: str | None = None
 
 
 class ConfirmLayoutRequest(BaseModel):
@@ -83,7 +84,7 @@ async def analyze_upload(
 
     # Run deterministic ingest
     try:
-        result = ingest(file_path, body.intent)
+        result = ingest(file_path, body.intent, preferred_sheet=body.sheet)
     except KeyError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

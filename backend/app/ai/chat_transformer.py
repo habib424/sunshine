@@ -238,14 +238,25 @@ def _read_file_structure(file_path: Path) -> dict:
     return structure
 
 
-def create_session(file_path: Path, goal: str = "journal_entry", intent: str = "convert_to_light_je") -> dict:
-    """Create a new chat session for a file."""
+def create_session(
+    file_path: Path,
+    goal: str = "journal_entry",
+    intent: str = "convert_to_light_je",
+    sheet: str | None = None,
+    display_name: str | None = None,
+) -> dict:
+    """Create a new chat session for a file.
+
+    `sheet` is the tab the user explicitly selected; deterministic analyzers
+    restrict source detection to it. `display_name` is the original upload
+    filename (the on-disk file is named by a UUID), used as a detection hint.
+    """
     session_id = str(uuid.uuid4())
     file_structure = _read_file_structure(file_path)
 
     if intent in DEFERRAL_INTENTS:
-        direction = intent_to_direction(intent, file_path)
-        analysis = analyze_deferral_workbook(file_path, direction)
+        direction = intent_to_direction(intent, file_path, display_name)
+        analysis = analyze_deferral_workbook(file_path, direction, sheet)
         target = TARGET_SCHEMAS.get("light_journal_entry_v2", {})
         system = (
             "Deterministic deferral migration session. The assistant should "
@@ -253,7 +264,7 @@ def create_session(file_path: Path, goal: str = "journal_entry", intent: str = "
             f"Target columns: {json.dumps(target.get('columns', []))}"
         )
     elif intent in OPEN_AP_INTENTS:
-        open_ap_mode, analysis = _analyze_open_ap_auto(file_path)
+        open_ap_mode, analysis = _analyze_open_ap_auto(file_path, sheet)
         if open_ap_mode == "bills":
             target = TARGET_SCHEMAS.get("light_bills_ap_upload", {})
             system = (
@@ -271,7 +282,7 @@ def create_session(file_path: Path, goal: str = "journal_entry", intent: str = "
                 f"Target columns: {json.dumps(target.get('columns', []))}"
             )
     elif intent in OPEN_AR_INTENTS:
-        analysis = analyze_invoices_ar_workbook(file_path)
+        analysis = analyze_invoices_ar_workbook(file_path, sheet)
         target = TARGET_SCHEMAS.get("light_invoices_ar_upload", {})
         system = (
             "Deterministic open AR upload session (Light Invoices (AR) output). "
@@ -280,7 +291,7 @@ def create_session(file_path: Path, goal: str = "journal_entry", intent: str = "
             f"Target columns: {json.dumps(target.get('columns', []))}"
         )
     elif intent in FX_ADJUSTMENT_INTENTS:
-        analysis = analyze_fx_workbook(file_path)
+        analysis = analyze_fx_workbook(file_path, sheet)
         target = TARGET_SCHEMAS.get("light_fx_adjustment", {})
         system = (
             "Deterministic FX currency adjustment session. The assistant should "
@@ -317,6 +328,8 @@ def create_session(file_path: Path, goal: str = "journal_entry", intent: str = "
         "script": None,
         "goal": goal,
         "intent": intent,
+        "sheet": sheet,
+        "display_name": display_name,
     }
     if intent in DEFERRAL_INTENTS:
         _sessions[session_id]["deferral_analysis"] = analysis
@@ -627,7 +640,7 @@ def _chat_invoices_ar(session_id: str, user_message: str) -> dict:
     session["messages"].append({"role": "user", "content": user_message})
     analysis = session.get("invoices_ar_analysis")
     if analysis is None:
-        analysis = analyze_invoices_ar_workbook(file_path)
+        analysis = analyze_invoices_ar_workbook(file_path, session.get("sheet"))
 
     try:
         interpretation = interpret_intent_instruction(
@@ -668,7 +681,7 @@ def _execute_invoices_ar(session: dict, output_path: Path) -> dict:
     analysis = session.get("invoices_ar_analysis")
     if analysis is None:
         file_path = Path(session["file_path"])
-        analysis = analyze_invoices_ar_workbook(file_path)
+        analysis = analyze_invoices_ar_workbook(file_path, session.get("sheet"))
         session["invoices_ar_analysis"] = analysis
     if not analysis.ready:
         missing = analysis.questions or ["The open AR upload is missing required facts."]
@@ -711,7 +724,7 @@ def _chat_fx(session_id: str, user_message: str) -> dict:
     session["messages"].append({"role": "user", "content": user_message})
     analysis = session.get("fx_analysis")
     if analysis is None:
-        analysis = analyze_fx_workbook(file_path)
+        analysis = analyze_fx_workbook(file_path, session.get("sheet"))
 
     try:
         interpretation = interpret_intent_instruction(
@@ -752,7 +765,7 @@ def _execute_fx(session: dict, output_path: Path) -> dict:
     analysis = session.get("fx_analysis")
     if analysis is None:
         file_path = Path(session["file_path"])
-        analysis = analyze_fx_workbook(file_path)
+        analysis = analyze_fx_workbook(file_path, session.get("sheet"))
         session["fx_analysis"] = analysis
     if not analysis.ready:
         missing = analysis.questions or ["The FX adjustment is missing required facts."]
@@ -796,7 +809,9 @@ def _chat_deferral(session_id: str, user_message: str) -> dict:
     analysis = session.get("deferral_analysis")
     if analysis is None:
         analysis = analyze_deferral_workbook(
-            file_path, intent_to_direction(session["intent"], file_path)
+            file_path,
+            intent_to_direction(session["intent"], file_path, session.get("display_name")),
+            session.get("sheet"),
         )
 
     try:
@@ -838,7 +853,11 @@ def _execute_deferral(session: dict, output_path: Path) -> dict:
     analysis = session.get("deferral_analysis")
     if analysis is None:
         file_path = Path(session["file_path"])
-        analysis = analyze_deferral_workbook(file_path, intent_to_direction(session["intent"], file_path))
+        analysis = analyze_deferral_workbook(
+            file_path,
+            intent_to_direction(session["intent"], file_path, session.get("display_name")),
+            session.get("sheet"),
+        )
         session["deferral_analysis"] = analysis
     if not analysis.ready:
         missing = analysis.questions or ["The deferral migration is missing required facts."]
@@ -873,7 +892,7 @@ def _execute_deferral(session: dict, output_path: Path) -> dict:
     }
 
 
-def _analyze_open_ap_auto(file_path: Path) -> tuple[str, object]:
+def _analyze_open_ap_auto(file_path: Path, preferred_sheet: str | None = None) -> tuple[str, object]:
     """One open-AP intent, two deterministic outputs.
 
     A workbook carrying a Light Posting reference sheet wants its posting
@@ -881,10 +900,10 @@ def _analyze_open_ap_auto(file_path: Path) -> tuple[str, object]:
     ledgers — becomes Light bill documents, which need no assumed AP or
     clearing accounts.
     """
-    je_analysis = analyze_open_ap_workbook(file_path)
+    je_analysis = analyze_open_ap_workbook(file_path, preferred_sheet)
     if je_analysis.reference_sheet:
         return "je", je_analysis
-    return "bills", analyze_bills_ap_workbook(file_path)
+    return "bills", analyze_bills_ap_workbook(file_path, preferred_sheet)
 
 
 def _chat_open_ap(session_id: str, user_message: str) -> dict:
@@ -896,7 +915,7 @@ def _chat_open_ap(session_id: str, user_message: str) -> dict:
     session["messages"].append({"role": "user", "content": user_message})
     analysis = session.get("open_ap_analysis")
     if analysis is None:
-        mode, analysis = _analyze_open_ap_auto(file_path)
+        mode, analysis = _analyze_open_ap_auto(file_path, session.get("sheet"))
         session["open_ap_mode"] = mode
 
     try:
@@ -950,7 +969,7 @@ def _execute_open_ap(session: dict, output_path: Path) -> dict:
     mode = session.get("open_ap_mode", "bills")
     analysis = session.get("open_ap_analysis")
     if analysis is None:
-        mode, analysis = _analyze_open_ap_auto(file_path)
+        mode, analysis = _analyze_open_ap_auto(file_path, session.get("sheet"))
         session["open_ap_mode"] = mode
         session["open_ap_analysis"] = analysis
     if not analysis.ready:

@@ -179,6 +179,8 @@ _TOTAL_RE = re.compile(r"^total\b", re.IGNORECASE)
 @dataclass
 class OpenAPAnalysis:
     source_sheet: str | None = None
+    preferred_sheet: str | None = None
+    ai_notes: list[str] = field(default_factory=list)
     header_row: int | None = None
     layout: str = "flat"  # "flat" | "grouped"
     roles: dict[str, str] = field(default_factory=dict)
@@ -215,16 +217,114 @@ class OpenAPAnalysis:
         }
 
 
-def analyze_open_ap_workbook(file_path: Path) -> OpenAPAnalysis:
+_AI_ROLE_DESCRIPTIONS = {
+    "invoice_number": "invoice, document or bill number",
+    "vendor_name": "vendor or supplier name",
+    "invoice_date": "invoice or document date",
+    "due_date": "due date",
+    "voucher_number": "voucher or journal number",
+    "currency": "transaction currency code",
+    "open_amount": "open/remaining amount per invoice",
+    "amount": "original invoice amount",
+    "open_amount_local": "open amount in the local currency",
+    "amount_local": "original amount in the local currency",
+}
+_AI_COMPLETION_ROLES = (
+    "invoice_number", "vendor_name", "invoice_date", "due_date",
+    "currency", "open_amount", "amount",
+)
+
+
+def _complete_roles_via_ai(
+    file_path: Path,
+    sheets: dict[str, pd.DataFrame],
+    source: dict,
+    analysis: OpenAPAnalysis,
+) -> None:
+    from app.ai.layout_proposer import complete_roles
+
+    wanted = {
+        role: _AI_ROLE_DESCRIPTIONS[role]
+        for role in _AI_COMPLETION_ROLES
+        if role not in source["roles"]
+    }
+    if not wanted or source["sheet"] not in sheets:
+        return
+    extra = complete_roles(
+        file_path,
+        sheets[source["sheet"]],
+        source["sheet"],
+        source["header_row"],
+        known_roles=source["roles"],
+        wanted_roles=wanted,
+        task="This sheet is an open accounts payable ledger, one row per invoice.",
+    )
+    for role, header in extra.items():
+        source["roles"][role] = header
+        source.setdefault("role_confidence", {})[role] = 0.66
+    if extra:
+        analysis.ai_notes.append(
+            "AI mapped columns the keyword rules missed: "
+            + ", ".join(f"`{header}` -> {role.replace('_', ' ')}" for role, header in sorted(extra.items()))
+            + "."
+        )
+
+
+def _propose_source_via_ai(
+    file_path: Path,
+    sheets: dict[str, pd.DataFrame],
+    analysis: OpenAPAnalysis,
+) -> dict | None:
+    from app.ai.layout_proposer import propose_layout
+
+    candidates = {name: df for name, df in sheets.items() if name != analysis.reference_sheet}
+    proposal = propose_layout(
+        file_path,
+        candidates,
+        task="Find the open accounts payable ledger: a table with one row per outstanding vendor invoice.",
+        roles=dict(_AI_ROLE_DESCRIPTIONS),
+        required_roles=["invoice_number", "vendor_name"],
+        preferred_sheet=analysis.preferred_sheet,
+    )
+    if proposal is None:
+        return None
+    roles = proposal["roles"]
+    if not any(r in roles for r in ("invoice_date", "due_date")):
+        return None
+    if not any(r in roles for r in ("open_amount", "open_amount_local", "amount", "amount_local")):
+        return None
+    analysis.ai_notes.append(
+        "The column headers did not match known wordings, so the layout was "
+        "proposed by AI from the sheet contents — review the detected columns "
+        "before running."
+    )
+    return {
+        "sheet": proposal["sheet"],
+        "header_row": proposal["header_row"],
+        "layout": "flat",
+        "roles": roles,
+        "role_confidence": {role: 0.66 for role in roles},
+        "confidence": 0.66,
+        "is_template": False,
+    }
+
+
+def analyze_open_ap_workbook(file_path: Path, preferred_sheet: str | None = None) -> OpenAPAnalysis:
     sheets = pd.read_excel(file_path, sheet_name=None, header=None, engine="openpyxl")
     analysis = OpenAPAnalysis()
+    if preferred_sheet and preferred_sheet in sheets:
+        analysis.preferred_sheet = preferred_sheet
 
     ref = _find_light_posting_sheet(sheets)
     if ref:
         analysis.reference_sheet = ref["sheet"]
         analysis.reference_header_row = ref["header_row"]
 
-    source = _find_source_sheet_and_roles(sheets, analysis.reference_sheet)
+    source = _find_source_sheet_and_roles(sheets, analysis.reference_sheet, analysis.preferred_sheet)
+    if source:
+        _complete_roles_via_ai(file_path, sheets, source, analysis)
+    else:
+        source = _propose_source_via_ai(file_path, sheets, analysis)
     if source:
         analysis.source_sheet = source["sheet"]
         analysis.header_row = source["header_row"]
@@ -247,6 +347,7 @@ def apply_user_message_to_analysis(
     analysis: OpenAPAnalysis,
     message: str,
     file_path: Path,
+    preferred_sheet: str | None = None,
 ) -> OpenAPAnalysis:
     facts = dict(analysis.facts)
 
@@ -274,7 +375,7 @@ def apply_user_message_to_analysis(
     if posting_date:
         facts["posting_date"] = posting_date
 
-    refreshed = analyze_open_ap_workbook(file_path)
+    refreshed = analyze_open_ap_workbook(file_path, preferred_sheet or analysis.preferred_sheet)
     refreshed.facts.update({k: v for k, v in facts.items() if v not in (None, "")})
     refreshed.assumptions = _infer_assumptions(refreshed)
     refreshed.questions = _missing_questions(refreshed)
@@ -302,7 +403,7 @@ def apply_structured_updates_to_analysis(
 
     facts = dict(analysis.facts)
     facts.update(updates)
-    refreshed = analyze_open_ap_workbook(file_path)
+    refreshed = analyze_open_ap_workbook(file_path, analysis.preferred_sheet)
     refreshed.facts.update({key: value for key, value in facts.items() if value not in (None, "")})
     refreshed.assumptions = _infer_assumptions(refreshed)
     refreshed.questions = _missing_questions(refreshed)
@@ -374,11 +475,18 @@ def format_open_ap_analysis_message(analysis: OpenAPAnalysis) -> str:
     return "\n".join(lines)
 
 
-def _find_source_sheet_and_roles(sheets: dict[str, pd.DataFrame], reference_sheet: str | None) -> dict | None:
+def _find_source_sheet_and_roles(
+    sheets: dict[str, pd.DataFrame],
+    reference_sheet: str | None,
+    preferred_sheet: str | None = None,
+) -> dict | None:
     template_sheets = _find_template_sheets(sheets)
     candidates: list[dict] = []
     for name, df in sheets.items():
         if name == reference_sheet:
+            continue
+        # The user picked a specific tab: only that sheet may be the source.
+        if preferred_sheet and preferred_sheet in sheets and name != preferred_sheet:
             continue
         candidate = _detect_ap_sheet_layout(name, df)
         if candidate:
@@ -583,7 +691,8 @@ def _infer_facts(file_path: Path, analysis: OpenAPAnalysis) -> dict[str, Any]:
 
 
 def _infer_assumptions(analysis: OpenAPAnalysis) -> list[str]:
-    assumptions = [
+    assumptions = list(analysis.ai_notes)
+    assumptions += [
         f"Target currency is `{analysis.facts.get('local_currency', 'SEK')}` because the AP export has local-currency balance columns.",
         "Posting date uses the source invoice date unless you provide a migration posting date.",
     ]

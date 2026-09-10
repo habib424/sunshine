@@ -32,16 +32,27 @@ async def start_chat(upload_id: str, body: dict = None, db: AsyncSession = Depen
 
     intent = (body or {}).get("intent", "convert_to_light_je")
     goal = (body or {}).get("goal", "journal_entry")
+    sheet = (body or {}).get("sheet") or None
+    if sheet and upload.sheet_names and sheet not in upload.sheet_names:
+        raise HTTPException(status_code=400, detail=f"Sheet '{sheet}' not found in this file")
 
     # Run quick deterministic layout detection so the AI starts with
     # real knowledge about the file instead of guessing from scratch.
-    layout_context = _build_layout_context(file_path, intent)
+    layout_context = _build_layout_context(file_path, intent, sheet)
 
     try:
-        result = create_session(file_path, goal=goal, intent=intent)
+        result = create_session(
+            file_path, goal=goal, intent=intent, sheet=sheet, display_name=upload.original_name
+        )
 
         # Build a grounded initial message whose task matches the intent.
         initial_msg = f"I've uploaded '{upload.original_name}'.\n\n"
+
+        if sheet:
+            initial_msg += (
+                f"I selected the sheet '{sheet}' — work with that sheet only. "
+                f"Ignore the other tabs unless I explicitly ask about them.\n\n"
+            )
 
         if layout_context:
             initial_msg += (
@@ -63,7 +74,7 @@ async def start_chat(upload_id: str, body: dict = None, db: AsyncSession = Depen
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _build_layout_context(file_path: Path, intent: str) -> str:
+def _build_layout_context(file_path: Path, intent: str, sheet: str | None = None) -> str:
     """Run the deterministic layout detector and format findings for the AI."""
     if (
         intent == "reconcile_je_to_gl"
@@ -76,7 +87,7 @@ def _build_layout_context(file_path: Path, intent: str) -> str:
 
     try:
         from app.engine.ingest.orchestrator import ingest
-        result = ingest(file_path, intent)
+        result = ingest(file_path, intent, preferred_sheet=sheet)
 
         lines = []
         layout = result.layout
