@@ -625,10 +625,26 @@ def _verified_ai_reply(
             lines.append("Everything required is confirmed. It is ready to run.")
     return "\n".join(lines)
 
-def _ai_failure_reply() -> str:
+_SECRET_RE = re.compile(r"sk-[A-Za-z0-9_\-]{8,}")
+
+
+def _ai_failure_reply(exc: Exception | None = None) -> str:
+    """Explain an AI interpretation failure, naming the underlying cause.
+
+    A blanket message hides whether the key is missing, the model is
+    unavailable, or the service is rate limiting, which costs an operator a
+    debugging round-trip. Any API key in the text is redacted.
+    """
+    reason = ""
+    if exc is not None:
+        cause = exc.__cause__ or exc
+        detail = _SECRET_RE.sub("sk-***", str(cause)).strip()
+        if detail:
+            reason = f" Reason: {detail[:300]}"
     return (
-        "I could not evaluate that instruction with AI, so I did not change the plan. "
-        "Please try again; Sunshine will not silently fall back to keyword matching."
+        "I could not evaluate that instruction with AI, so I did not change the plan."
+        + reason
+        + " Please try again; Sunshine will not silently fall back to keyword matching."
     )
 
 
@@ -642,18 +658,24 @@ def _chat_invoices_ar(session_id: str, user_message: str) -> dict:
     if analysis is None:
         analysis = analyze_invoices_ar_workbook(file_path, session.get("sheet"))
 
-    try:
-        interpretation = interpret_intent_instruction(
-            intent=session["intent"],
-            user_message=user_message,
-            state=_analysis_state(analysis),
-            initial=initial,
-        )
-    except AIInterpretationError:
-        session["ai_instruction_pending"] = True
-        assistant_text = _ai_failure_reply()
-        session["messages"].append({"role": "assistant", "content": assistant_text})
-        return {"message": assistant_text, "has_script": False, "session_id": session_id}
+    # The opening turn carries a synthetic kickoff message, not a user
+    # instruction, and its interpretation is discarded below. Skipping the
+    # AI call there keeps the deterministic analysis reaching the user even
+    # when the AI service is unreachable, and saves a request per session.
+    interpretation = None
+    if not initial:
+        try:
+            interpretation = interpret_intent_instruction(
+                intent=session["intent"],
+                user_message=user_message,
+                state=_analysis_state(analysis),
+                initial=initial,
+            )
+        except AIInterpretationError as exc:
+            session["ai_instruction_pending"] = True
+            assistant_text = _ai_failure_reply(exc)
+            session["messages"].append({"role": "assistant", "content": assistant_text})
+            return {"message": assistant_text, "has_script": False, "session_id": session_id}
 
     changes: dict[str, object] = {}
     if not initial and interpretation.understood and not interpretation.clarification_question:
@@ -726,18 +748,24 @@ def _chat_fx(session_id: str, user_message: str) -> dict:
     if analysis is None:
         analysis = analyze_fx_workbook(file_path, session.get("sheet"))
 
-    try:
-        interpretation = interpret_intent_instruction(
-            intent=session["intent"],
-            user_message=user_message,
-            state=_analysis_state(analysis),
-            initial=initial,
-        )
-    except AIInterpretationError:
-        session["ai_instruction_pending"] = True
-        assistant_text = _ai_failure_reply()
-        session["messages"].append({"role": "assistant", "content": assistant_text})
-        return {"message": assistant_text, "has_script": False, "session_id": session_id}
+    # The opening turn carries a synthetic kickoff message, not a user
+    # instruction, and its interpretation is discarded below. Skipping the
+    # AI call there keeps the deterministic analysis reaching the user even
+    # when the AI service is unreachable, and saves a request per session.
+    interpretation = None
+    if not initial:
+        try:
+            interpretation = interpret_intent_instruction(
+                intent=session["intent"],
+                user_message=user_message,
+                state=_analysis_state(analysis),
+                initial=initial,
+            )
+        except AIInterpretationError as exc:
+            session["ai_instruction_pending"] = True
+            assistant_text = _ai_failure_reply(exc)
+            session["messages"].append({"role": "assistant", "content": assistant_text})
+            return {"message": assistant_text, "has_script": False, "session_id": session_id}
 
     changes: dict[str, object] = {}
     if not initial and interpretation.understood and not interpretation.clarification_question:
@@ -814,18 +842,24 @@ def _chat_deferral(session_id: str, user_message: str) -> dict:
             session.get("sheet"),
         )
 
-    try:
-        interpretation = interpret_intent_instruction(
-            intent=session["intent"],
-            user_message=user_message,
-            state=_analysis_state(analysis),
-            initial=initial,
-        )
-    except AIInterpretationError:
-        session["ai_instruction_pending"] = True
-        assistant_text = _ai_failure_reply()
-        session["messages"].append({"role": "assistant", "content": assistant_text})
-        return {"message": assistant_text, "has_script": False, "session_id": session_id}
+    # The opening turn carries a synthetic kickoff message, not a user
+    # instruction, and its interpretation is discarded below. Skipping the
+    # AI call there keeps the deterministic analysis reaching the user even
+    # when the AI service is unreachable, and saves a request per session.
+    interpretation = None
+    if not initial:
+        try:
+            interpretation = interpret_intent_instruction(
+                intent=session["intent"],
+                user_message=user_message,
+                state=_analysis_state(analysis),
+                initial=initial,
+            )
+        except AIInterpretationError as exc:
+            session["ai_instruction_pending"] = True
+            assistant_text = _ai_failure_reply(exc)
+            session["messages"].append({"role": "assistant", "content": assistant_text})
+            return {"message": assistant_text, "has_script": False, "session_id": session_id}
 
     changes: dict[str, object] = {}
     if not initial and interpretation.understood and not interpretation.clarification_question:
@@ -918,19 +952,25 @@ def _chat_open_ap(session_id: str, user_message: str) -> dict:
         mode, analysis = _analyze_open_ap_auto(file_path, session.get("sheet"))
         session["open_ap_mode"] = mode
 
-    try:
-        interpretation = interpret_intent_instruction(
-            intent=session["intent"],
-            user_message=user_message,
-            state=_analysis_state(analysis, mode=mode),
-            mode=mode,
-            initial=initial,
-        )
-    except AIInterpretationError:
-        session["ai_instruction_pending"] = True
-        assistant_text = _ai_failure_reply()
-        session["messages"].append({"role": "assistant", "content": assistant_text})
-        return {"message": assistant_text, "has_script": False, "session_id": session_id}
+    # The opening turn carries a synthetic kickoff message, not a user
+    # instruction, and its interpretation is discarded below. Skipping the
+    # AI call there keeps the deterministic analysis reaching the user even
+    # when the AI service is unreachable, and saves a request per session.
+    interpretation = None
+    if not initial:
+        try:
+            interpretation = interpret_intent_instruction(
+                intent=session["intent"],
+                user_message=user_message,
+                state=_analysis_state(analysis, mode=mode),
+                mode=mode,
+                initial=initial,
+            )
+        except AIInterpretationError as exc:
+            session["ai_instruction_pending"] = True
+            assistant_text = _ai_failure_reply(exc)
+            session["messages"].append({"role": "assistant", "content": assistant_text})
+            return {"message": assistant_text, "has_script": False, "session_id": session_id}
 
     changes: dict[str, object] = {}
     if not initial and interpretation.understood and not interpretation.clarification_question:

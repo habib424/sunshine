@@ -94,7 +94,14 @@ app.include_router(api_router)
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "app": settings.app_name}
+    # ai_configured surfaces a missing ANTHROPIC_API_KEY, which otherwise
+    # only shows up as an unexplained AI error mid-conversation. It reports
+    # whether a key is set, never any part of its value.
+    return {
+        "status": "ok",
+        "app": settings.app_name,
+        "ai_configured": bool(settings.anthropic_api_key.strip()),
+    }
 
 
 # In production the built frontend (frontend/dist) is served by this app, so
