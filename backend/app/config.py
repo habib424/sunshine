@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 # Project root is one level up from backend/
@@ -36,6 +37,22 @@ class Settings(BaseSettings):
     auth_allowed_domain: str = "light.inc"
     auth_secret_key: str = ""
     session_https_only: bool = False
+
+    # Credentials pasted into a dashboard routinely pick up a trailing
+    # newline or stray spaces. An API key with a newline is not a network
+    # problem but it reads like one: the HTTP client refuses the illegal
+    # header and the SDK reports it as a connection error. Strip them once,
+    # here, so no caller has to remember to.
+    @field_validator(
+        "anthropic_api_key",
+        "google_client_id",
+        "auth_secret_key",
+        "auth_allowed_domain",
+        mode="after",
+    )
+    @classmethod
+    def _strip_whitespace(cls, value: str) -> str:
+        return value.strip()
 
     @property
     def auth_required(self) -> bool:
